@@ -1,0 +1,22 @@
+# PDF files (don't commit copyrighted books)
+*.pdf
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Output files (each user generates their own)
+output/**/*.md
+output/**/*.rtf
+output/**/*.txt
+
+# Keep directory structure
+!.gitkeep

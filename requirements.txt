@@ -1,0 +1,3 @@
+marker-pdf
+pdf2image
+pytesseract

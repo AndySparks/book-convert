@@ -13,24 +13,39 @@ Usage:
     python convert.py input/MyBook.pdf --method ocr      # Force OCR for scanned PDFs
     python convert.py input/MyBook.pdf --method marker    # Use marker-pdf
     python convert.py input/                              # Convert all PDFs in a directory
+    python convert.py input/ --skip-existing              # Skip already-converted files
 """
 
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
+class DependencyError(Exception):
+    """Raised when a required dependency is missing."""
+    pass
+
+
+class ConversionError(Exception):
+    """Raised when a conversion fails."""
+    pass
+
+
 def check_dependencies(method):
-    """Check that required tools are installed for the chosen method."""
+    """Check that required tools are installed for the chosen method.
+
+    Raises DependencyError if anything is missing.
+    """
     if method == "pymupdf":
         try:
             import fitz
         except ImportError:
-            print("Missing dependency: PyMuPDF (pip install pymupdf)")
-            sys.exit(1)
+            raise DependencyError("Missing dependency: PyMuPDF (pip install pymupdf)")
 
     elif method == "marker":
         try:
@@ -40,8 +55,7 @@ def check_dependencies(method):
                 timeout=10,
             )
         except FileNotFoundError:
-            print("Missing dependency: marker-pdf (pip install marker-pdf)")
-            sys.exit(1)
+            raise DependencyError("Missing dependency: marker-pdf (pip install marker-pdf)")
 
     elif method == "ocr":
         missing = []
@@ -57,26 +71,35 @@ def check_dependencies(method):
             subprocess.run(["tesseract", "--version"], capture_output=True, timeout=10)
         except FileNotFoundError:
             missing.append("tesseract (brew install tesseract)")
+        # Check for Poppler (required by pdf2image for PDF rendering)
+        try:
+            subprocess.run(["pdftoppm", "-v"], capture_output=True, timeout=10)
+        except FileNotFoundError:
+            missing.append("poppler (brew install poppler)")
 
         if missing:
-            print("Missing dependencies:")
+            lines = ["Missing dependencies:"]
             for dep in missing:
-                print(f"  - {dep}")
-            sys.exit(1)
+                lines.append(f"  - {dep}")
+            raise DependencyError("\n".join(lines))
 
 
 def clean_title(stem):
     """Derive a clean book title from the PDF filename stem."""
-    # Remove version markers like "V3", "v2.1", "2nd edition", etc.
     title = re.sub(r'\s*[Vv]\d+(\.\d+)?\s*$', '', stem)
     title = re.sub(r'\s*\d+(st|nd|rd|th)\s+[Ee]dition\s*$', '', title)
-    # Remove trailing parenthetical edition markers
     title = re.sub(r'\s*\([^)]*[Ee]dition[^)]*\)\s*$', '', title)
     return title.strip()
 
 
+MIN_TEXT_RATIO = 0.1  # At least 10% of pages must have extractable text
+
+
 def convert_with_pymupdf(pdf_path, output_dir):
-    """Convert a PDF using PyMuPDF (fitz) for text extraction."""
+    """Convert a PDF using PyMuPDF (fitz) for text extraction.
+
+    Raises ConversionError if the PDF appears to be scanned (too little text).
+    """
     import fitz
 
     print(f"Converting with PyMuPDF: {pdf_path.name}")
@@ -87,7 +110,9 @@ def convert_with_pymupdf(pdf_path, output_dir):
     title = clean_title(pdf_path.stem)
     output_file = output_dir / f"{pdf_path.stem}.md"
 
-    with open(output_file, "w") as f:
+    pages_with_text = 0
+
+    with open(output_file, "w", encoding="utf-8") as f:
         f.write(f"# {title}\n\n")
         f.write("*Converted from PDF*\n\n")
         f.write(f"*Source: {pdf_path.name}*\n\n")
@@ -96,6 +121,7 @@ def convert_with_pymupdf(pdf_path, output_dir):
         for i in range(total_pages):
             text = doc[i].get_text()
             if text.strip():
+                pages_with_text += 1
                 f.write(f"<!-- Page {i + 1} -->\n\n")
                 f.write(text.strip())
                 f.write("\n\n")
@@ -103,78 +129,144 @@ def convert_with_pymupdf(pdf_path, output_dir):
                 print(f"  Processed {i + 1}/{total_pages} pages...")
 
     doc.close()
+
+    # Check if we got enough text to consider this a real conversion
+    if total_pages > 0 and (pages_with_text / total_pages) < MIN_TEXT_RATIO:
+        output_file.unlink(missing_ok=True)
+        raise ConversionError(
+            f"Only {pages_with_text}/{total_pages} pages had extractable text. "
+            f"This PDF may be scanned. Try: --method ocr"
+        )
+
     print(f"  -> {output_file}")
     return True
 
 
 def convert_with_marker(pdf_path, output_dir):
-    """Convert a text-based PDF using Marker."""
-    print(f"Converting with Marker: {pdf_path.name}")
-    result = subprocess.run(
-        ["marker_single", str(pdf_path), str(output_dir)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        print(f"Marker error: {result.stderr}")
-        return False
+    """Convert a text-based PDF using Marker.
 
-    # Find the generated markdown file and rename it
-    for md_file in output_dir.rglob("*.md"):
+    Runs Marker in an isolated temp directory to avoid corrupting existing output.
+    Raises ConversionError on failure.
+    """
+    print(f"Converting with Marker: {pdf_path.name}")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = subprocess.run(
+            ["marker_single", str(pdf_path), tmpdir],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise ConversionError(f"Marker error: {result.stderr}")
+
+        # Find the generated markdown in the temp directory
+        tmp_path = Path(tmpdir)
+        md_files = list(tmp_path.rglob("*.md"))
+        if not md_files:
+            raise ConversionError(
+                "Marker produced no output. Try --method ocr for scanned PDFs."
+            )
+
+        # Move the first markdown file to the target location
         target = output_dir / f"{pdf_path.stem}.md"
-        if md_file != target:
-            md_file.rename(target)
+        shutil.move(str(md_files[0]), str(target))
         print(f"  -> {target}")
         return True
 
-    print("  No output generated. Try --method ocr for scanned PDFs.")
-    return False
-
 
 def convert_with_ocr(pdf_path, output_dir):
-    """Convert a scanned PDF using OCR (pdf2image + tesseract)."""
+    """Convert a scanned PDF using OCR (pdf2image + tesseract).
+
+    Processes pages one at a time to avoid loading all images into memory.
+    Raises ConversionError on failure.
+    """
     print(f"Converting with OCR: {pdf_path.name}")
 
-    from pdf2image import convert_from_path
+    from pdf2image import convert_from_path, pdfinfo_from_path
     import pytesseract
 
     title = clean_title(pdf_path.stem)
     output_file = output_dir / f"{pdf_path.stem}.md"
 
-    pages = convert_from_path(str(pdf_path), dpi=300)
-    print(f"  Processing {len(pages)} pages...")
+    # Get page count first, then process one page at a time
+    info = pdfinfo_from_path(str(pdf_path))
+    total_pages = info["Pages"]
+    print(f"  {total_pages} pages")
 
-    with open(output_file, "w") as f:
+    with open(output_file, "w", encoding="utf-8") as f:
         f.write(f"# {title}\n\n")
         f.write("*Converted from PDF using OCR*\n\n")
         f.write(f"*Source: {pdf_path.name}*\n\n")
         f.write("---\n\n")
 
-        for i, page in enumerate(pages, 1):
-            text = pytesseract.image_to_string(page)
-            if text.strip():
-                f.write(f"<!-- Page {i} -->\n\n")
-                f.write(text.strip())
-                f.write("\n\n")
+        for i in range(1, total_pages + 1):
+            # Convert one page at a time to keep memory bounded
+            images = convert_from_path(
+                str(pdf_path), dpi=300, first_page=i, last_page=i
+            )
+            if images:
+                text = pytesseract.image_to_string(images[0])
+                if text.strip():
+                    f.write(f"<!-- Page {i} -->\n\n")
+                    f.write(text.strip())
+                    f.write("\n\n")
             if i % 10 == 0:
-                print(f"  Processed {i}/{len(pages)} pages...")
+                print(f"  Processed {i}/{total_pages} pages...")
 
     print(f"  -> {output_file}")
     return True
 
 
 def convert_pdf(pdf_path, output_dir, method="pymupdf"):
-    """Convert a single PDF to markdown."""
+    """Convert a single PDF to markdown.
+
+    Returns True on success, False on failure. Never raises.
+    """
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if method == "ocr":
-        return convert_with_ocr(pdf_path, output_dir)
-    elif method == "marker":
-        return convert_with_marker(pdf_path, output_dir)
+    try:
+        if method == "ocr":
+            return convert_with_ocr(pdf_path, output_dir)
+        elif method == "marker":
+            return convert_with_marker(pdf_path, output_dir)
+        else:
+            return convert_with_pymupdf(pdf_path, output_dir)
+    except ConversionError as e:
+        print(f"  FAILED: {e}")
+        return False
+    except Exception as e:
+        # Clean up partial output on unexpected errors
+        partial = output_dir / f"{pdf_path.stem}.md"
+        if partial.exists():
+            partial.unlink()
+        print(f"  FAILED (unexpected): {e}")
+        return False
+
+
+def collect_pdfs(input_path):
+    """Collect PDF files from a path (file or directory).
+
+    Handles both .pdf and .PDF extensions in directory mode.
+    """
+    input_path = Path(input_path)
+
+    if input_path.is_file() and input_path.suffix.lower() == ".pdf":
+        return [input_path]
+    elif input_path.is_dir():
+        pdfs = sorted(
+            p for p in input_path.iterdir()
+            if p.is_file() and p.suffix.lower() == ".pdf"
+        )
+        if not pdfs:
+            print(f"No PDF files found in {input_path}")
+            sys.exit(1)
+        print(f"Found {len(pdfs)} PDF(s) to convert.\n")
+        return pdfs
     else:
-        return convert_with_pymupdf(pdf_path, output_dir)
+        print(f"Not a PDF file or directory: {input_path}")
+        sys.exit(1)
 
 
 def main():
@@ -205,6 +297,11 @@ def main():
         help="Shortcut for --method ocr",
     )
     parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip PDFs that already have a markdown file in the output directory",
+    )
+    parser.add_argument(
         "--skip-check",
         action="store_true",
         help="Skip dependency check",
@@ -214,34 +311,39 @@ def main():
     method = "ocr" if args.ocr else args.method
 
     if not args.skip_check:
-        check_dependencies(method)
-
-    input_path = Path(args.input)
-    output_dir = Path(args.output)
-
-    if input_path.is_file() and input_path.suffix.lower() == ".pdf":
-        pdfs = [input_path]
-    elif input_path.is_dir():
-        pdfs = sorted(input_path.glob("*.pdf"))
-        if not pdfs:
-            print(f"No PDF files found in {input_path}")
+        try:
+            check_dependencies(method)
+        except DependencyError as e:
+            print(e)
             sys.exit(1)
-        print(f"Found {len(pdfs)} PDF(s) to convert.\n")
-    else:
-        print(f"Not a PDF file or directory: {input_path}")
-        sys.exit(1)
+
+    output_dir = Path(args.output)
+    pdfs = collect_pdfs(args.input)
 
     success = 0
     failed = 0
+    skipped = 0
 
     for pdf in pdfs:
+        if args.skip_existing:
+            existing = output_dir / f"{pdf.stem}.md"
+            if existing.exists():
+                print(f"Skipping (already exists): {pdf.name}")
+                skipped += 1
+                continue
+
         if convert_pdf(pdf, output_dir, method=method):
             success += 1
         else:
             failed += 1
         print()
 
-    print(f"Done. {success} converted, {failed} failed.")
+    parts = [f"{success} converted", f"{failed} failed"]
+    if skipped:
+        parts.append(f"{skipped} skipped")
+    print(f"Done. {', '.join(parts)}.")
+
+    sys.exit(1 if failed else 0)
 
 
 if __name__ == "__main__":

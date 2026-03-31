@@ -9,13 +9,7 @@ Three conversion methods:
 
 ## Setup
 
-### 1. Install system dependencies (macOS)
-
-```bash
-brew install tesseract poppler ghostscript
-```
-
-### 2. Clone and set up Python environment
+### 1. Clone and set up Python environment
 
 ```bash
 git clone https://github.com/AndySparks/BookConvert.git
@@ -23,6 +17,17 @@ cd BookConvert
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+```
+
+This installs PyMuPDF (the default method). For OCR or Marker, install extras:
+
+```bash
+# OCR support (for scanned PDFs)
+brew install tesseract poppler
+pip install pdf2image pytesseract
+
+# Marker support (requires Python 3.10+)
+pip install marker-pdf
 ```
 
 ## Usage
@@ -47,6 +52,12 @@ python convert.py input/ScannedBook.pdf --method ocr   # Use OCR for scanned PDF
 python convert.py input/ScannedBook.pdf --ocr          # Shortcut for --method ocr
 ```
 
+### Skip already-converted files
+
+```bash
+python convert.py input/ --skip-existing
+```
+
 ### Specify output directory
 
 ```bash
@@ -69,9 +80,10 @@ This project includes a `CLAUDE.md` file, so [Claude Code](https://docs.anthropi
 
 - **Start with the default mode** (PyMuPDF). It's fast and works on any Python version.
 - **Use `--method marker`** if you have Python 3.10+ and want richer markdown formatting.
-- **Use `--ocr` only if** the default mode produces empty or garbled output -- this usually means the PDF is scanned/image-based.
+- **Use `--ocr` only if** the default mode produces empty or garbled output -- this usually means the PDF is scanned/image-based. The tool will detect this and suggest OCR automatically.
 - **OCR output may need cleanup.** Claude Code can help you fix OCR artifacts, add proper headings, and improve formatting.
 - **Organize your output** into subdirectories by topic (e.g., `output/Coaching/`, `output/Writing/`) to keep things tidy.
+- **Use `--skip-existing`** when re-running on a directory to avoid re-converting files you already have.
 
 ## Project structure
 

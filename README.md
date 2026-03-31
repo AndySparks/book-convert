@@ -2,7 +2,10 @@
 
 Convert PDF books to clean Markdown files for use in [Claude Projects](https://claude.ai), NotebookLM, and other LLM tools.
 
-Handles both text-based PDFs (using [Marker](https://github.com/VikParuchuri/marker)) and scanned/image-based PDFs (using OCR via Tesseract).
+Three conversion methods:
+- **PyMuPDF** (default): Fast, reliable text extraction that works on any Python 3.7+
+- **Marker**: High-quality markdown conversion (requires Python 3.10+)
+- **OCR**: Tesseract OCR for scanned/image-based PDFs
 
 ## Setup
 
@@ -36,10 +39,12 @@ python convert.py input/MyBook.pdf
 python convert.py input/
 ```
 
-### Convert a scanned/image-based PDF (OCR mode)
+### Choose a conversion method
 
 ```bash
-python convert.py input/ScannedBook.pdf --ocr
+python convert.py input/MyBook.pdf --method marker    # Use marker-pdf (needs Python 3.10+)
+python convert.py input/ScannedBook.pdf --method ocr   # Use OCR for scanned PDFs
+python convert.py input/ScannedBook.pdf --ocr          # Shortcut for --method ocr
 ```
 
 ### Specify output directory
@@ -51,9 +56,10 @@ python convert.py input/MyBook.pdf --output output/Philosophy/
 ## How it works
 
 1. Drop your PDF(s) into the `input/` folder
-2. Run `convert.py` — it uses **Marker** by default for text-based PDFs, which produces high-quality markdown
-3. For scanned books (where the pages are images), use the `--ocr` flag — this uses **Tesseract** to extract text via OCR
-4. Converted markdown appears in `output/`
+2. Run `convert.py` -- it uses **PyMuPDF** by default for fast, reliable text extraction
+3. For higher-quality markdown formatting, use `--method marker` (requires Python 3.10+)
+4. For scanned books (where the pages are images), use `--method ocr` or `--ocr`
+5. Converted markdown appears in `output/`
 
 ## Using with Claude Code
 
@@ -61,8 +67,9 @@ This project includes a `CLAUDE.md` file, so [Claude Code](https://docs.anthropi
 
 ## Tips
 
-- **Start with the default mode** (no `--ocr` flag). It's faster and produces better formatting for text-based PDFs.
-- **Use `--ocr` only if** the default mode produces empty or garbled output — this usually means the PDF is scanned/image-based.
+- **Start with the default mode** (PyMuPDF). It's fast and works on any Python version.
+- **Use `--method marker`** if you have Python 3.10+ and want richer markdown formatting.
+- **Use `--ocr` only if** the default mode produces empty or garbled output -- this usually means the PDF is scanned/image-based.
 - **OCR output may need cleanup.** Claude Code can help you fix OCR artifacts, add proper headings, and improve formatting.
 - **Organize your output** into subdirectories by topic (e.g., `output/Coaching/`, `output/Writing/`) to keep things tidy.
 

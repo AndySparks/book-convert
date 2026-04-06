@@ -128,10 +128,22 @@ def clean_text(text):
     punctuation on the previous line AND starts with uppercase).
 
     Also fixes hyphenated word breaks across lines.
+    Preserves YAML frontmatter (between --- fences) untouched.
     """
     lines = text.split('\n')
     result = []
     i = 0
+
+    # Skip YAML frontmatter if present
+    if lines and lines[0].strip() == '---':
+        result.append(lines[0])
+        i = 1
+        while i < len(lines):
+            result.append(lines[i])
+            if lines[i].strip() == '---':
+                i += 1
+                break
+            i += 1
 
     while i < len(lines):
         line = lines[i]

@@ -95,19 +95,39 @@ def clean_title(stem):
 MIN_TEXT_RATIO = 0.1  # At least 10% of pages must have extractable text
 
 
+def _is_structural_line(stripped):
+    """Check if a line is a structural markdown element that should not be joined."""
+    if not stripped:
+        return True
+    if stripped.startswith('<!-- Page'):
+        return True
+    if stripped.startswith('#'):
+        return True
+    if stripped.startswith('>'):
+        return True
+    if stripped.startswith('- ') or stripped.startswith('* '):
+        return True
+    if stripped.startswith('|'):
+        return True
+    if re.match(r'^\d+[\.\)]\s', stripped):
+        return True
+    if stripped.startswith('```') or stripped.startswith('---') or stripped.startswith('***'):
+        return True
+    # ALL-CAPS lines are likely headings
+    if re.match(r'^[A-Z][A-Z\s]{5,}$', stripped):
+        return True
+    return False
+
+
 def clean_text(text):
     """Post-process extracted text to fix common PDF conversion artifacts.
 
-    Fixes:
-    - Orphaned short lines from narrow column layouts (rejoins into paragraphs)
-    - Hyphenated word breaks across lines (e.g., "alterna-\\ntives" -> "alternatives")
+    Joins all lines within a paragraph into single long lines. A paragraph
+    ends at a blank line, a structural element (heading, list, page marker,
+    etc.), or a line that clearly starts a new paragraph (after sentence-ending
+    punctuation on the previous line AND starts with uppercase).
 
-    Preserves:
-    - Page markers (<!-- Page N -->)
-    - Blank lines between paragraphs
-    - Lines starting with uppercase (likely headings or new paragraphs)
-    - Lines starting with special characters (bullets, numbers, quotes, etc.)
-    - Lines that are part of markdown formatting (headers, lists, etc.)
+    Also fixes hyphenated word breaks across lines.
     """
     lines = text.split('\n')
     result = []
@@ -117,66 +137,36 @@ def clean_text(text):
         line = lines[i]
         stripped = line.strip()
 
-        # Always preserve blank lines, page markers, headers, and special lines
-        if (not stripped
-                or stripped.startswith('<!-- Page')
-                or stripped.startswith('#')
-                or stripped.startswith('>')
-                or stripped.startswith('- ')
-                or stripped.startswith('* ')
-                or stripped.startswith('|')
-                or re.match(r'^\d+[\.\)]\s', stripped)
-                or stripped.startswith('```')
-                or stripped.startswith('---')
-                or stripped.startswith('***')):
+        # Preserve structural lines as-is
+        if _is_structural_line(stripped):
             result.append(line)
             i += 1
             continue
 
-        # Fix hyphenated word breaks: if line ends with - and next line
-        # starts lowercase, join them without the hyphen
-        if (stripped.endswith('-')
-                and i + 1 < len(lines)
-                and lines[i + 1].strip()
-                and lines[i + 1].strip()[0].islower()):
-            # Join hyphenated word
-            line = line.rstrip()
-            line = line[:-1] + lines[i + 1].strip()
-            i += 1
-            # Don't append yet -- fall through to the joining logic below
-            # so we can continue joining if needed
+        # Start building a paragraph by joining continuation lines
+        while i + 1 < len(lines):
+            next_line = lines[i + 1]
+            next_stripped = next_line.strip()
 
-        # Join short lines that are fragments of a paragraph.
-        # A line is considered a fragment if:
-        # - it's short (under 80 chars), AND
-        # - the next line is also short or continues the sentence, AND
-        # - neither line is a special markdown element
-        # We join even if the next line starts uppercase, as long as the
-        # current line doesn't end with sentence-ending punctuation and
-        # the next line is also short (suggesting it's a column fragment,
-        # not a new paragraph or heading).
-        while (i + 1 < len(lines)
-               and len(line.strip()) < 80
-               and lines[i + 1].strip()
-               and not lines[i + 1].strip().startswith('<!-- Page')
-               and not lines[i + 1].strip().startswith('#')
-               and not lines[i + 1].strip().startswith('>')
-               and not lines[i + 1].strip().startswith('- ')
-               and not lines[i + 1].strip().startswith('* ')
-               and not lines[i + 1].strip().startswith('|')
-               and not re.match(r'^\d+[\.\)]\s', lines[i + 1].strip())
-               and not lines[i + 1].strip().startswith('```')
-               and not lines[i + 1].strip().startswith('---')
-               and (lines[i + 1].strip()[0].islower()
-                    or (len(lines[i + 1].strip()) < 80
-                        and not line.rstrip().endswith(('.', '!', '?', ':', '"', '\u201d'))
-                        and not re.match(r'^[A-Z][A-Z\s]{5,}$', lines[i + 1].strip())))):
-            next_stripped = lines[i + 1].strip()
-            # Check for hyphenated break at end of current joined line
-            if line.rstrip().endswith('-'):
-                line = line.rstrip()[:-1] + next_stripped
+            # Stop joining at structural elements or blank lines
+            if _is_structural_line(next_stripped):
+                break
+
+            # Stop joining if the current line ends a sentence AND
+            # the next line starts a new one (uppercase after period)
+            current_trimmed = line.rstrip()
+            if (current_trimmed
+                    and current_trimmed[-1] in '.!?"\u201d'
+                    and next_stripped
+                    and next_stripped[0].isupper()
+                    and len(current_trimmed) > 40):
+                break
+
+            # Fix hyphenated word breaks
+            if current_trimmed.endswith('-') and next_stripped and next_stripped[0].islower():
+                line = current_trimmed[:-1] + next_stripped
             else:
-                line = line.rstrip() + ' ' + next_stripped
+                line = current_trimmed + ' ' + next_stripped
             i += 1
 
         result.append(line)

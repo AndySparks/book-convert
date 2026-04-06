@@ -95,6 +95,96 @@ def clean_title(stem):
 MIN_TEXT_RATIO = 0.1  # At least 10% of pages must have extractable text
 
 
+def clean_text(text):
+    """Post-process extracted text to fix common PDF conversion artifacts.
+
+    Fixes:
+    - Orphaned short lines from narrow column layouts (rejoins into paragraphs)
+    - Hyphenated word breaks across lines (e.g., "alterna-\\ntives" -> "alternatives")
+
+    Preserves:
+    - Page markers (<!-- Page N -->)
+    - Blank lines between paragraphs
+    - Lines starting with uppercase (likely headings or new paragraphs)
+    - Lines starting with special characters (bullets, numbers, quotes, etc.)
+    - Lines that are part of markdown formatting (headers, lists, etc.)
+    """
+    lines = text.split('\n')
+    result = []
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # Always preserve blank lines, page markers, headers, and special lines
+        if (not stripped
+                or stripped.startswith('<!-- Page')
+                or stripped.startswith('#')
+                or stripped.startswith('>')
+                or stripped.startswith('- ')
+                or stripped.startswith('* ')
+                or stripped.startswith('|')
+                or re.match(r'^\d+[\.\)]\s', stripped)
+                or stripped.startswith('```')
+                or stripped.startswith('---')
+                or stripped.startswith('***')):
+            result.append(line)
+            i += 1
+            continue
+
+        # Fix hyphenated word breaks: if line ends with - and next line
+        # starts lowercase, join them without the hyphen
+        if (stripped.endswith('-')
+                and i + 1 < len(lines)
+                and lines[i + 1].strip()
+                and lines[i + 1].strip()[0].islower()):
+            # Join hyphenated word
+            line = line.rstrip()
+            line = line[:-1] + lines[i + 1].strip()
+            i += 1
+            # Don't append yet -- fall through to the joining logic below
+            # so we can continue joining if needed
+
+        # Join short lines that are fragments of a paragraph.
+        # A line is considered a fragment if:
+        # - it's short (under 80 chars), AND
+        # - the next line is also short or continues the sentence, AND
+        # - neither line is a special markdown element
+        # We join even if the next line starts uppercase, as long as the
+        # current line doesn't end with sentence-ending punctuation and
+        # the next line is also short (suggesting it's a column fragment,
+        # not a new paragraph or heading).
+        while (i + 1 < len(lines)
+               and len(line.strip()) < 80
+               and lines[i + 1].strip()
+               and not lines[i + 1].strip().startswith('<!-- Page')
+               and not lines[i + 1].strip().startswith('#')
+               and not lines[i + 1].strip().startswith('>')
+               and not lines[i + 1].strip().startswith('- ')
+               and not lines[i + 1].strip().startswith('* ')
+               and not lines[i + 1].strip().startswith('|')
+               and not re.match(r'^\d+[\.\)]\s', lines[i + 1].strip())
+               and not lines[i + 1].strip().startswith('```')
+               and not lines[i + 1].strip().startswith('---')
+               and (lines[i + 1].strip()[0].islower()
+                    or (len(lines[i + 1].strip()) < 80
+                        and not line.rstrip().endswith(('.', '!', '?', ':', '"', '\u201d'))
+                        and not re.match(r'^[A-Z][A-Z\s]{5,}$', lines[i + 1].strip())))):
+            next_stripped = lines[i + 1].strip()
+            # Check for hyphenated break at end of current joined line
+            if line.rstrip().endswith('-'):
+                line = line.rstrip()[:-1] + next_stripped
+            else:
+                line = line.rstrip() + ' ' + next_stripped
+            i += 1
+
+        result.append(line)
+        i += 1
+
+    return '\n'.join(result)
+
+
 def convert_with_pymupdf(pdf_path, output_dir):
     """Convert a PDF using PyMuPDF (fitz) for text extraction.
 
@@ -123,7 +213,7 @@ def convert_with_pymupdf(pdf_path, output_dir):
             if text.strip():
                 pages_with_text += 1
                 f.write(f"<!-- Page {i + 1} -->\n\n")
-                f.write(text.strip())
+                f.write(clean_text(text.strip()))
                 f.write("\n\n")
             if (i + 1) % 50 == 0:
                 print(f"  Processed {i + 1}/{total_pages} pages...")
@@ -269,13 +359,33 @@ def collect_pdfs(input_path):
         sys.exit(1)
 
 
+def clean_markdown_file(md_path):
+    """Apply clean_text to an existing markdown file in place.
+
+    Preserves the header (everything before the first <!-- Page marker
+    or the first blank line after ---).
+    """
+    md_path = Path(md_path)
+    print(f"Cleaning: {md_path.name}")
+
+    content = md_path.read_text(encoding="utf-8")
+    before = content.count('\n')
+    cleaned = clean_text(content)
+    after = cleaned.count('\n')
+
+    md_path.write_text(cleaned, encoding="utf-8")
+    removed = before - after
+    print(f"  {removed} lines joined ({before} -> {after})")
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Convert PDF books to clean Markdown."
     )
     parser.add_argument(
         "input",
-        help="PDF file or directory of PDFs to convert",
+        help="PDF file, markdown file, or directory to convert/clean",
     )
     parser.add_argument(
         "--output",
@@ -297,6 +407,12 @@ def main():
         help="Shortcut for --method ocr",
     )
     parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Clean existing markdown file(s) -- fix orphaned lines and hyphenation. "
+             "Pass a .md file or directory of .md files.",
+    )
+    parser.add_argument(
         "--skip-existing",
         action="store_true",
         help="Skip PDFs that already have a markdown file in the output directory",
@@ -308,6 +424,25 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Clean mode: process existing markdown files
+    if args.clean:
+        input_path = Path(args.input)
+        if input_path.is_file() and input_path.suffix == ".md":
+            clean_markdown_file(input_path)
+        elif input_path.is_dir():
+            md_files = sorted(input_path.glob("*.md"))
+            if not md_files:
+                print(f"No .md files found in {input_path}")
+                sys.exit(1)
+            for md_file in md_files:
+                clean_markdown_file(md_file)
+            print(f"\nDone. Cleaned {len(md_files)} file(s).")
+        else:
+            print(f"Not a .md file or directory: {input_path}")
+            sys.exit(1)
+        sys.exit(0)
+
     method = "ocr" if args.ocr else args.method
 
     if not args.skip_check:

@@ -248,8 +248,10 @@ def _strip_running_headers(pages_text):
 
     def _normalize_header(line):
         """Strip page numbers and whitespace to find the repeating core."""
-        s = re.sub(r'^\d+\s*', '', line)   # leading page number
-        s = re.sub(r'\s*\d+$', '', s)       # trailing page number
+        s = re.sub(r'^\d+\s*', '', line)       # leading page number
+        s = re.sub(r'\s*\d+$', '', s)           # trailing page number
+        s = re.sub(r'\s*\|\s*\w*$', '', s)      # trailing "| page" (O'Reilly style)
+        s = re.sub(r'^\w+\s*\|\s*', '', s)      # leading "page |" (O'Reilly style)
         return s.strip()
 
     for _, text in pages_text:
@@ -365,6 +367,14 @@ def _strip_running_headers(pages_text):
             ):
                 continue
 
+            # Strip "CHAPTER TITLE | page" or "page | BOOK TITLE" running headers
+            # (common in O'Reilly and similar publishers)
+            if (is_near_top or is_near_bottom) and re.match(
+                r'^(?:\d{1,4}\s*\|\s*[A-Z].*|[A-Z][A-Z\s\',]+\|\s*\d{1,4})$', stripped
+            ):
+                log.debug("  Stripping pipe header/footer on page %d: %r", page_num, stripped)
+                continue
+
             # Strip trailing page number appended to last line
             if is_last:
                 line = re.sub(r'\s+\d{1,4}\s*$', '', line)
@@ -400,7 +410,9 @@ def _format_headings(text):
             continue
 
         # "Chapter N" or "Part N" patterns -> ##
-        if re.match(r'^(Chapter|CHAPTER|Part|PART)\s+(\d+|[IVXLC]+)', stripped, re.I):
+        # Max 10 words to avoid promoting full sentences like "Chapter 9 is a wildcard..."
+        if (re.match(r'^(Chapter|CHAPTER|Part|PART)\s+(\d+|[IVXLC]+)', stripped, re.I)
+                and len(stripped.split()) <= 10):
             result.append(f"## {stripped}")
             continue
 

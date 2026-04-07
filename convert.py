@@ -311,6 +311,10 @@ def _strip_running_headers(pages_text):
     # Also detect standalone page-number lines (just a number, maybe with spaces)
     # Always strip these, even if no header/footer patterns were found
     standalone_pagenum = re.compile(r'^\s*\d{1,4}\s*$')
+    # Also match standalone roman numeral page numbers (front matter)
+    roman_pagenum = re.compile(
+        r'^\s*[ivxlc]{1,7}\s*$', re.I
+    )
 
     result = []
     for page_num, text in pages_text:
@@ -355,8 +359,10 @@ def _strip_running_headers(pages_text):
                         log.debug("  Stripped inline header on page %d: prefix=%r", page_num, prefix)
                         break
 
-            # Strip standalone page numbers at start/end of page
-            if (is_near_top or is_near_bottom) and standalone_pagenum.match(stripped):
+            # Strip standalone page numbers (arabic or roman) at start/end of page
+            if (is_near_top or is_near_bottom) and (
+                standalone_pagenum.match(stripped) or roman_pagenum.match(stripped)
+            ):
                 continue
 
             # Strip trailing page number appended to last line
@@ -399,15 +405,24 @@ def _format_headings(text):
             continue
 
         # ALL-CAPS lines that are likely headings (5-80 chars, mostly letters)
+        # Only promote if the line is standalone: prev and next lines are
+        # empty, page markers, or other structural elements (avoids false
+        # positives from inline all-caps text like newspaper headlines)
         if (re.match(r'^[A-Z][A-Z\s\d:,\-&]{4,79}$', stripped)
                 and len(stripped) < 80
                 and sum(1 for c in stripped if c.isalpha()) > len(stripped) * 0.6):
-            # Determine heading level by length heuristic
-            if len(stripped) < 20:
-                result.append(f"### {stripped}")
-            else:
-                result.append(f"## {stripped}")
-            continue
+            prev_stripped = lines[i - 1].strip() if i > 0 else ''
+            next_stripped = lines[i + 1].strip() if i + 1 < len(lines) else ''
+            prev_ok = (not prev_stripped or prev_stripped.startswith('<!-- Page')
+                       or prev_stripped.startswith('#'))
+            next_ok = (not next_stripped or next_stripped.startswith('<!-- Page')
+                       or next_stripped.startswith('#'))
+            if prev_ok or next_ok:
+                if len(stripped) < 20:
+                    result.append(f"### {stripped}")
+                else:
+                    result.append(f"## {stripped}")
+                continue
 
         result.append(line)
 
@@ -451,6 +466,42 @@ def _format_toc(text):
     return '\n'.join(result)
 
 
+def _normalize_bullets(text):
+    """Convert Unicode bullet characters to standard markdown list items.
+
+    Handles inline bullet runs (● Item 1 ● Item 2) by splitting them
+    onto separate lines, and standalone bullet lines by normalizing the marker.
+    """
+    bullet_chars = r'[●•◆▪▸►‣⬥]'
+
+    # Split inline bullet runs: "● Item 1 ● Item 2" -> separate lines
+    # Only if there are 2+ bullets on the same line
+    def _split_inline_bullets(m):
+        line = m.group(0)
+        items = re.split(r'\s*' + bullet_chars + r'\s*', line)
+        items = [item.strip() for item in items if item.strip()]
+        if len(items) >= 2:
+            return '\n'.join(f'- {item}' for item in items)
+        return line
+
+    text = re.sub(
+        r'^.*' + bullet_chars + r'.*' + bullet_chars + r'.*$',
+        _split_inline_bullets,
+        text,
+        flags=re.MULTILINE,
+    )
+
+    # Normalize standalone bullet lines: "● Item" -> "- Item"
+    text = re.sub(
+        r'^(\s*)' + bullet_chars + r'\s*',
+        r'\1- ',
+        text,
+        flags=re.MULTILINE,
+    )
+
+    return text
+
+
 def clean_text(text):
     """Post-process extracted text to fix common PDF conversion artifacts.
 
@@ -462,10 +513,11 @@ def clean_text(text):
     Also fixes ligatures, split-word artifacts, hyphenated word breaks, and
     soft hyphens. Preserves YAML frontmatter (between --- fences) untouched.
     """
-    # Fix ligatures, split words, missing spaces, and spaced-out letters
+    # Fix ligatures, split words, missing spaces, spaced-out letters, and bullets
     text = _fix_ligatures(text)
     text = _fix_missing_spaces(text)
     text = _collapse_spaced_letters(text)
+    text = _normalize_bullets(text)
 
     lines = text.split('\n')
     result = []
@@ -563,10 +615,13 @@ def convert_with_pymupdf(pdf_path, output_dir):
         f.write("---\n\n")
 
         for page_num, text in cleaned_pages:
-            f.write(f"<!-- Page {page_num} -->\n\n")
             cleaned = clean_text(text)
             cleaned = _format_headings(cleaned)
             cleaned = _format_toc(cleaned)
+            # Skip blank pages (no content after cleaning)
+            if not cleaned.strip():
+                continue
+            f.write(f"<!-- Page {page_num} -->\n\n")
             f.write(cleaned)
             f.write("\n\n")
 

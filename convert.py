@@ -17,13 +17,17 @@ Usage:
 """
 
 import argparse
+import logging
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import traceback
 from pathlib import Path
+
+log = logging.getLogger("bookconvert")
 
 
 class DependencyError(Exception):
@@ -49,11 +53,16 @@ def check_dependencies(method):
 
     elif method == "marker":
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["marker_single", "--help"],
                 capture_output=True,
                 timeout=10,
             )
+            if result.returncode != 0:
+                raise DependencyError(
+                    "marker-pdf is installed but marker_single --help returned "
+                    f"exit code {result.returncode}. Try reinstalling: pip install marker-pdf"
+                )
         except FileNotFoundError:
             raise DependencyError("Missing dependency: marker-pdf (pip install marker-pdf)")
 
@@ -194,6 +203,254 @@ def _fix_missing_spaces(text):
     return text
 
 
+def _collapse_spaced_letters(text):
+    """Collapse spaced-out letter artifacts back into words.
+
+    PDF extraction sometimes produces headings like "H e a d i n g" from
+    custom-spaced font rendering. Detects sequences of single letters
+    separated by spaces and collapses them.
+    """
+    def _collapse_match(m):
+        collapsed = m.group(0).replace(' ', '')
+        # Only collapse if result is at least 3 chars (avoid false positives)
+        if len(collapsed) >= 3:
+            return collapsed
+        return m.group(0)
+
+    # Match sequences of single letters separated by 1-3 spaces (or thin/en spaces)
+    # At least 4 single-letter groups to avoid false positives like "a b"
+    text = re.sub(r'\b[A-Za-z](?:[\s\u2002\u2003\u2009]{1,3}[A-Za-z]){3,}\b', _collapse_match, text)
+    return text
+
+
+def _strip_running_headers(pages_text):
+    """Detect and remove running headers and footers from page texts.
+
+    Analyzes the first and last few lines of each page to find repeated
+    patterns (book title, chapter name, page numbers) that appear across
+    multiple pages. Strips them from the body text.
+
+    Args:
+        pages_text: list of (page_num, raw_text) tuples
+
+    Returns:
+        list of (page_num, cleaned_text) tuples
+    """
+    if len(pages_text) < 5:
+        return pages_text
+
+    # Collect the first few and last few lines from each page
+    # to detect running headers/footers regardless of position
+    from collections import Counter
+
+    top_lines = []   # (normalized_line, raw_line) from top of each page
+    bottom_lines = []
+
+    def _normalize_header(line):
+        """Strip page numbers and whitespace to find the repeating core."""
+        s = re.sub(r'^\d+\s*', '', line)   # leading page number
+        s = re.sub(r'\s*\d+$', '', s)       # trailing page number
+        return s.strip()
+
+    for _, text in pages_text:
+        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        # Check up to first 3 lines for header patterns
+        for l in lines[:3]:
+            top_lines.append(_normalize_header(l))
+        # Check last 3 lines for footer patterns
+        for l in lines[-3:]:
+            bottom_lines.append(_normalize_header(l))
+
+    top_counts = Counter(n for n in top_lines if n and len(n) > 3)
+    bottom_counts = Counter(n for n in bottom_lines if n and len(n) > 3)
+
+    # A header/footer pattern must appear on at least 15% of pages
+    threshold = max(3, len(pages_text) * 0.15)
+
+    header_patterns = {pat for pat, count in top_counts.items() if count >= threshold}
+    footer_patterns = {pat for pat, count in bottom_counts.items() if count >= threshold}
+
+    log.debug("Detected %d header pattern(s), %d footer pattern(s)",
+              len(header_patterns), len(footer_patterns))
+    for p in header_patterns:
+        log.debug("  Header: %r", p)
+    for p in footer_patterns:
+        log.debug("  Footer: %r", p)
+
+    # Also detect inline header patterns: "123 Book Title Text continues..."
+    # where the page number + title is prepended to the first paragraph
+    inline_header_patterns = set()
+    for pat in header_patterns:
+        if pat:
+            inline_header_patterns.add(pat)
+    # Also detect the book title from the majority of first-line content
+    # even if it wasn't standalone (embedded in first paragraph)
+    first_line_content = []
+    for _, text in pages_text:
+        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        if lines:
+            first_line_content.append(lines[0])
+
+    # Look for a common title prefix: "NNN Title Text rest of paragraph"
+    title_prefix_counts = Counter()
+    for line in first_line_content:
+        # Try to extract "NNN Title Words" from start of line
+        m = re.match(r'^(\d{1,4})\s+(.+?)(?:\s{2,}|\s+[A-Z][a-z])', line)
+        if m:
+            candidate = m.group(2).strip()
+            if len(candidate) > 5:
+                title_prefix_counts[candidate] += 1
+
+    inline_title_prefixes = {
+        pat for pat, count in title_prefix_counts.items()
+        if count >= threshold
+    }
+    for p in inline_title_prefixes:
+        log.debug("  Inline title prefix: %r (appears %d times)", p, title_prefix_counts[p])
+
+    # Also detect standalone page-number lines (just a number, maybe with spaces)
+    # Always strip these, even if no header/footer patterns were found
+    standalone_pagenum = re.compile(r'^\s*\d{1,4}\s*$')
+
+    result = []
+    for page_num, text in pages_text:
+        lines = text.split('\n')
+        cleaned = []
+        for j, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped:
+                cleaned.append(line)
+                continue
+
+            norm = _normalize_header(stripped)
+
+            # Check position relative to page boundaries
+            non_empty_indices = [k for k, l in enumerate(lines) if l.strip()]
+            if not non_empty_indices:
+                cleaned.append(line)
+                continue
+            pos_in_nonempty = non_empty_indices.index(j) if j in non_empty_indices else -1
+            is_near_top = pos_in_nonempty >= 0 and pos_in_nonempty < 3
+            is_near_bottom = pos_in_nonempty >= 0 and pos_in_nonempty >= len(non_empty_indices) - 3
+            is_first = pos_in_nonempty == 0
+            is_last = pos_in_nonempty == len(non_empty_indices) - 1
+
+            # Strip if it matches a detected header pattern near top of page
+            if is_near_top and norm in header_patterns:
+                log.debug("  Stripping header on page %d: %r", page_num, stripped)
+                continue
+            # Strip if it matches a detected footer pattern near bottom of page
+            if is_near_bottom and norm in footer_patterns:
+                log.debug("  Stripping footer on page %d: %r", page_num, stripped)
+                continue
+
+            # Strip inline title prefix from first content line: "123 Book Title rest..."
+            if is_near_top and inline_title_prefixes:
+                for prefix in inline_title_prefixes:
+                    pat = re.compile(r'^\d{1,4}\s+' + re.escape(prefix) + r'\s+')
+                    m = pat.match(stripped)
+                    if m:
+                        stripped = stripped[m.end():]
+                        line = stripped
+                        log.debug("  Stripped inline header on page %d: prefix=%r", page_num, prefix)
+                        break
+
+            # Strip standalone page numbers at start/end of page
+            if (is_near_top or is_near_bottom) and standalone_pagenum.match(stripped):
+                continue
+
+            # Strip trailing page number appended to last line
+            if is_last:
+                line = re.sub(r'\s+\d{1,4}\s*$', '', line)
+
+            cleaned.append(line)
+        result.append((page_num, '\n'.join(cleaned)))
+
+    return result
+
+
+def _format_headings(text):
+    """Detect and format section headings as markdown.
+
+    Identifies heading patterns:
+    - ALL-CAPS lines (short, standalone)
+    - "Chapter N" / "Part N" patterns
+    - Short standalone lines before body text
+    """
+    lines = text.split('\n')
+    result = []
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+
+        # Skip empty lines and page markers
+        if not stripped or stripped.startswith('<!-- Page'):
+            result.append(line)
+            continue
+
+        # Already a markdown heading
+        if stripped.startswith('#'):
+            result.append(line)
+            continue
+
+        # "Chapter N" or "Part N" patterns -> ##
+        if re.match(r'^(Chapter|CHAPTER|Part|PART)\s+(\d+|[IVXLC]+)', stripped, re.I):
+            result.append(f"## {stripped}")
+            continue
+
+        # ALL-CAPS lines that are likely headings (5-80 chars, mostly letters)
+        if (re.match(r'^[A-Z][A-Z\s\d:,\-&]{4,79}$', stripped)
+                and len(stripped) < 80
+                and sum(1 for c in stripped if c.isalpha()) > len(stripped) * 0.6):
+            # Determine heading level by length heuristic
+            if len(stripped) < 20:
+                result.append(f"### {stripped}")
+            else:
+                result.append(f"## {stripped}")
+            continue
+
+        result.append(line)
+
+    return '\n'.join(result)
+
+
+def _format_toc(text):
+    """Detect and reformat collapsed table of contents.
+
+    TOC entries often get collapsed into single lines like:
+    "Foreword ix Introduction xiii Chapter 1 1"
+    This splits them back onto separate lines.
+    """
+    lines = text.split('\n')
+    result = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Detect collapsed TOC: multiple "Title pagenum" pairs on one line
+        # Pattern: word(s) followed by roman numeral or number, repeated 3+ times
+        toc_pattern = re.compile(
+            r'((?:[A-Z][A-Za-z\s\':,\-]+?)\s+'
+            r'(?:[ivxlc]+|\d{1,3}))'
+        )
+        matches = toc_pattern.findall(stripped)
+        if len(matches) >= 3 and len(stripped) > 60:
+            # This looks like a collapsed TOC - split entries onto separate lines
+            # Use a more precise split: title followed by page number
+            entries = re.findall(
+                r'([A-Z][A-Za-z\s\':,\-]+?)\s+((?:[ivxlc]+|\d{1,3}))(?=\s+[A-Z]|\s*$)',
+                stripped
+            )
+            if len(entries) >= 3:
+                for title, page in entries:
+                    result.append(f"- {title.strip()} ... {page}")
+                continue
+
+        result.append(line)
+
+    return '\n'.join(result)
+
+
 def clean_text(text):
     """Post-process extracted text to fix common PDF conversion artifacts.
 
@@ -205,9 +462,10 @@ def clean_text(text):
     Also fixes ligatures, split-word artifacts, hyphenated word breaks, and
     soft hyphens. Preserves YAML frontmatter (between --- fences) untouched.
     """
-    # Fix ligatures, split words, and missing spaces before line joining
+    # Fix ligatures, split words, missing spaces, and spaced-out letters
     text = _fix_ligatures(text)
     text = _fix_missing_spaces(text)
+    text = _collapse_spaced_letters(text)
 
     lines = text.split('\n')
     result = []
@@ -283,23 +541,34 @@ def convert_with_pymupdf(pdf_path, output_dir):
 
     pages_with_text = 0
 
+    # First pass: extract all page texts
+    raw_pages = []
+    for i in range(total_pages):
+        text = doc[i].get_text()
+        if text.strip():
+            pages_with_text += 1
+            raw_pages.append((i + 1, text.strip()))
+        if (i + 1) % 50 == 0:
+            print(f"  Processed {i + 1}/{total_pages} pages...")
+
+    doc.close()
+
+    # Strip running headers/footers across all pages
+    cleaned_pages = _strip_running_headers(raw_pages)
+
     with open(output_file, "w", encoding="utf-8") as f:
         f.write(f"# {title}\n\n")
         f.write("*Converted from PDF*\n\n")
         f.write(f"*Source: {pdf_path.name}*\n\n")
         f.write("---\n\n")
 
-        for i in range(total_pages):
-            text = doc[i].get_text()
-            if text.strip():
-                pages_with_text += 1
-                f.write(f"<!-- Page {i + 1} -->\n\n")
-                f.write(clean_text(text.strip()))
-                f.write("\n\n")
-            if (i + 1) % 50 == 0:
-                print(f"  Processed {i + 1}/{total_pages} pages...")
-
-    doc.close()
+        for page_num, text in cleaned_pages:
+            f.write(f"<!-- Page {page_num} -->\n\n")
+            cleaned = clean_text(text)
+            cleaned = _format_headings(cleaned)
+            cleaned = _format_toc(cleaned)
+            f.write(cleaned)
+            f.write("\n\n")
 
     # Check if we got enough text to consider this a real conversion
     if total_pages > 0 and (pages_with_text / total_pages) < MIN_TEXT_RATIO:
@@ -341,6 +610,45 @@ def convert_with_marker(pdf_path, output_dir):
         # Move the first markdown file to the target location
         target = output_dir / f"{pdf_path.stem}.md"
         shutil.move(str(md_files[0]), str(target))
+
+        # Move any image directories that marker produced
+        img_dirs = [d for d in tmp_path.rglob("*") if d.is_dir() and d.name == "images"]
+        if not img_dirs:
+            # Also check for any image files directly
+            img_files = list(tmp_path.rglob("*.png")) + list(tmp_path.rglob("*.jpg"))
+            if img_files:
+                img_dest = output_dir / f"{pdf_path.stem}_images"
+                img_dest.mkdir(exist_ok=True)
+                for img in img_files:
+                    shutil.move(str(img), str(img_dest / img.name))
+                # Update image paths in the markdown
+                content = target.read_text(encoding="utf-8")
+                content = re.sub(
+                    r'!\[([^\]]*)\]\((?:[^)]*/)([^)]+)\)',
+                    rf'![\1]({pdf_path.stem}_images/\2)',
+                    content
+                )
+                target.write_text(content, encoding="utf-8")
+                print(f"  Moved {len(img_files)} image(s) to {img_dest}")
+        else:
+            for img_dir in img_dirs:
+                img_dest = output_dir / f"{pdf_path.stem}_images"
+                if img_dest.exists():
+                    shutil.rmtree(str(img_dest))
+                shutil.move(str(img_dir), str(img_dest))
+                # Update image paths in the markdown
+                content = target.read_text(encoding="utf-8")
+                content = re.sub(
+                    r'!\[([^\]]*)\]\((?:[^)]*/)([^)]+)\)',
+                    rf'![\1]({pdf_path.stem}_images/\2)',
+                    content
+                )
+                target.write_text(content, encoding="utf-8")
+                print(f"  Moved images to {img_dest}")
+
+        if len(md_files) > 1:
+            log.warning("Marker produced %d .md files; only the first was used", len(md_files))
+
         print(f"  -> {target}")
         return True
 
@@ -379,7 +687,10 @@ def convert_with_ocr(pdf_path, output_dir):
                 text = pytesseract.image_to_string(images[0])
                 if text.strip():
                     f.write(f"<!-- Page {i} -->\n\n")
-                    f.write(text.strip())
+                    cleaned = clean_text(text.strip())
+                    cleaned = _format_headings(cleaned)
+                    cleaned = _format_toc(cleaned)
+                    f.write(cleaned)
                     f.write("\n\n")
             if i % 10 == 0:
                 print(f"  Processed {i}/{total_pages} pages...")
@@ -388,10 +699,12 @@ def convert_with_ocr(pdf_path, output_dir):
     return True
 
 
-def convert_pdf(pdf_path, output_dir, method="pymupdf"):
+def convert_pdf(pdf_path, output_dir, method="pymupdf", auto_ocr=False):
     """Convert a single PDF to markdown.
 
     Returns True on success, False on failure. Never raises.
+    If auto_ocr is True and pymupdf/marker fails due to scanned content,
+    automatically retries with OCR.
     """
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)
@@ -405,6 +718,21 @@ def convert_pdf(pdf_path, output_dir, method="pymupdf"):
         else:
             return convert_with_pymupdf(pdf_path, output_dir)
     except ConversionError as e:
+        if auto_ocr and method != "ocr" and "scanned" in str(e).lower():
+            print(f"  Text extraction failed, auto-retrying with OCR...")
+            try:
+                check_dependencies("ocr")
+                return convert_with_ocr(pdf_path, output_dir)
+            except DependencyError as dep_e:
+                print(f"  OCR fallback unavailable: {dep_e}")
+                return False
+            except Exception as ocr_e:
+                partial = output_dir / f"{pdf_path.stem}.md"
+                if partial.exists():
+                    partial.unlink()
+                print(f"  OCR fallback also failed: {ocr_e}")
+                log.debug(traceback.format_exc())
+                return False
         print(f"  FAILED: {e}")
         return False
     except Exception as e:
@@ -413,6 +741,7 @@ def convert_pdf(pdf_path, output_dir, method="pymupdf"):
         if partial.exists():
             partial.unlink()
         print(f"  FAILED (unexpected): {e}")
+        log.debug(traceback.format_exc())
         return False
 
 
@@ -499,17 +828,33 @@ def main():
         help="Skip PDFs that already have a markdown file in the output directory",
     )
     parser.add_argument(
+        "--auto-ocr",
+        action="store_true",
+        help="Automatically retry with OCR if text extraction fails (scanned PDFs)",
+    )
+    parser.add_argument(
         "--skip-check",
         action="store_true",
         help="Skip dependency check",
     )
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Enable verbose/debug logging output",
+    )
 
     args = parser.parse_args()
+
+    # Configure logging based on --verbose flag
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.WARNING,
+        format="  [%(levelname)s] %(message)s",
+    )
 
     # Clean mode: process existing markdown files
     if args.clean:
         input_path = Path(args.input)
-        if input_path.is_file() and input_path.suffix == ".md":
+        if input_path.is_file() and input_path.suffix.lower() == ".md":
             clean_markdown_file(input_path)
         elif input_path.is_dir():
             md_files = sorted(input_path.glob("*.md"))
@@ -548,7 +893,7 @@ def main():
                 skipped += 1
                 continue
 
-        if convert_pdf(pdf, output_dir, method=method):
+        if convert_pdf(pdf, output_dir, method=method, auto_ocr=args.auto_ocr):
             success += 1
         else:
             failed += 1

@@ -19,6 +19,23 @@ This project converts PDF books to clean Markdown files for use in Claude Projec
 - Use `<!-- Page N -->` comments to mark page boundaries
 - The `clean_title()` function strips version markers (e.g., "V3") from filenames for cleaner titles
 
+## Post-Conversion Quality Check (REQUIRED)
+
+After every conversion run, automatically spot-check each converted file:
+
+1. **Sample three sections** of each output file: beginning (~80 lines), middle, and end (~80 lines)
+2. **Check for** these known issues:
+   - Running headers/page numbers leaking into body text
+   - Table of contents collapsed into single lines
+   - Section headings not formatted as markdown `##`/`###`
+   - Spaced-out letter artifacts in headings (`H e a d i n g`)
+   - Bullet lists collapsed to inline text
+   - Split/joined words from line-break extraction
+   - Missing end-matter (bibliography, index, conclusion)
+3. **Rate each file** as good/fair/poor
+4. **Report findings** to the user in a summary table
+5. **Note any improvement opportunities** for the BookConvert tool itself and offer to file them as GitHub issues on AndySparks/BookConvert
+
 ## Dependencies
 
 - `pymupdf` - default converter, fast text extraction via PyMuPDF/fitz

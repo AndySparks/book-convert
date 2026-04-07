@@ -119,6 +119,35 @@ def _is_structural_line(stripped):
     return False
 
 
+def _fix_ligatures(text):
+    """Replace PDF ligature characters and fix split-word artifacts.
+
+    PDF extraction often produces ligature characters (fi, ff, fl, ffi, ffl)
+    and sometimes splits the word around them with a space (e.g. "eﬀ ective"
+    becomes "eff ective" after ligature replacement). This function handles
+    both problems.
+    """
+    # Replace ligature characters (order matters: longer first)
+    text = text.replace('\ufb03', 'ffi')
+    text = text.replace('\ufb04', 'ffl')
+    text = text.replace('\ufb01', 'fi')
+    text = text.replace('\ufb00', 'ff')
+    text = text.replace('\ufb02', 'fl')
+
+    # Fix split-word artifacts: "fi rst" -> "first", "eff ective" -> "effective"
+    text = re.sub(r'(\w*(?:fi|ff|fl))\s+([a-z]{1,8})\b', r'\1\2', text)
+
+    # Fix "Th e" -> "The" (common ligature-adjacent artifact)
+    text = re.sub(r'\bTh\s+e\b', 'The', text)
+    text = re.sub(r'\bth\s+e\b', 'the', text)
+
+    # Fix soft hyphens with following whitespace/newline
+    text = re.sub(r'\u00ad\s*\n\s*', '', text)
+    text = re.sub(r'\u00ad\s+', '', text)
+
+    return text
+
+
 def clean_text(text):
     """Post-process extracted text to fix common PDF conversion artifacts.
 
@@ -127,9 +156,12 @@ def clean_text(text):
     etc.), or a line that clearly starts a new paragraph (after sentence-ending
     punctuation on the previous line AND starts with uppercase).
 
-    Also fixes hyphenated word breaks across lines.
-    Preserves YAML frontmatter (between --- fences) untouched.
+    Also fixes ligatures, split-word artifacts, hyphenated word breaks, and
+    soft hyphens. Preserves YAML frontmatter (between --- fences) untouched.
     """
+    # Fix ligatures and split words before line joining
+    text = _fix_ligatures(text)
+
     lines = text.split('\n')
     result = []
     i = 0

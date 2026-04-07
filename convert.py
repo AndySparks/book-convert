@@ -148,6 +148,52 @@ def _fix_ligatures(text):
     return text
 
 
+# --- Missing-space fix for words jammed together by PDF extraction ---
+
+_OFF_REAL = re.compile(
+    r'^off(er|ers|ered|ering|erings|ice|ices|icer|icers|icial|ials|ially|'
+    r'set|sets|line|end|ends|ended|ender|enders|ending|ense|enses|ensive|'
+    r'spring|beat|hand|load|shore|side|stage|season|shoot|shoots|'
+    r'ish|putting|ramp|screen|site|track|year)$', re.I
+)
+_STUFF_REAL = re.compile(r'^stuff(ed|ing|ings|s|y|ier|iest)$', re.I)
+_SELF_REAL = re.compile(
+    r'^self(ish|ishly|ishness|less|lessness|lessly|same|dom|hood)$', re.I
+)
+
+
+def _fix_missing_spaces(text):
+    """Fix words jammed together by PDF extraction.
+
+    PDF text extraction sometimes drops the space between words, especially
+    after "off", "stuff", and "self" + following word. This function splits
+    them: "offthe" -> "off the", "stuffin" -> "stuff in",
+    "selfprotection" -> "self-protection".
+    """
+    def _fix_off(m):
+        full = m.group(0)
+        if _OFF_REAL.match(full):
+            return full
+        return 'off ' + full[3:]
+
+    def _fix_stuff(m):
+        full = m.group(0)
+        if _STUFF_REAL.match(full):
+            return full
+        return 'stuff ' + full[5:]
+
+    def _fix_self(m):
+        full = m.group(0)
+        if _SELF_REAL.match(full):
+            return full
+        return 'self-' + full[4:]
+
+    text = re.sub(r'\boff[a-z]+', _fix_off, text)
+    text = re.sub(r'\bstuff[a-z]+', _fix_stuff, text)
+    text = re.sub(r'\bself[a-z]+', _fix_self, text)
+    return text
+
+
 def clean_text(text):
     """Post-process extracted text to fix common PDF conversion artifacts.
 
@@ -159,8 +205,9 @@ def clean_text(text):
     Also fixes ligatures, split-word artifacts, hyphenated word breaks, and
     soft hyphens. Preserves YAML frontmatter (between --- fences) untouched.
     """
-    # Fix ligatures and split words before line joining
+    # Fix ligatures, split words, and missing spaces before line joining
     text = _fix_ligatures(text)
+    text = _fix_missing_spaces(text)
 
     lines = text.split('\n')
     result = []

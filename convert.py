@@ -840,30 +840,88 @@ def _detect_two_column_split(page):
     if best_coverage / len(rows) < 0.75:
         return None
 
-    # Both sides must have meaningful content. A single-column page can
-    # have high "no crossing" coverage if words happen to cluster on one
-    # side; require substantial rows with content wholly on each side.
-    # Threshold is asymmetric so we still pick up pages that are mostly
-    # one column with a biographical or figure-caption sidebar on the
-    # other side — if we miss those, PyMuPDF's default reading order
-    # interleaves the sidebar into the body.
-    left_rows = sum(
+    # Two-column pages come in two flavors:
+    #
+    # (1) "Synchronized": rows contain content from BOTH columns at the
+    #     same y (e.g. argyris1977 body where PyMuPDF merges the columns
+    #     into one block and we get words from both sides on every row).
+    #     Signal: rows have a clean horizontal gap at the gutter.
+    #
+    # (2) "Staggered": each visual row is entirely in one column, but the
+    #     columns are separate blocks stacked at different y-ranges (e.g.
+    #     argyris1955 p4 where PyMuPDF gives us distinct left-col and
+    #     right-col blocks). Signal: many rows live wholly in the left
+    #     half, many rows live wholly in the right half.
+    #
+    # Accept if either signal is strong. Reject only when neither holds,
+    # which correctly rules out 1-column pages with ragged-right lines
+    # (book indexes, bibliographies) where the right half is empty.
+    sync_rows = sum(
+        1 for _, intervals in rows
+        if _row_has_gutter_gap(intervals, best_x, min_gap_width=6)
+    )
+    left_only_rows = sum(
+        1 for _, intervals in rows
+        if intervals and all(ix1 < best_x - 2 for ix0, ix1 in intervals)
+    )
+    right_only_rows = sum(
+        1 for _, intervals in rows
+        if intervals and all(ix0 > best_x + 2 for ix0, ix1 in intervals)
+    )
+    # "Any" counts: rows with at least one word left of / right of gutter.
+    # Used for the asymmetric body+sidebar rule below.
+    left_any_rows = sum(
         1 for _, intervals in rows
         if any(ix1 < best_x - 2 for ix0, ix1 in intervals)
     )
-    right_rows = sum(
+    right_any_rows = sum(
         1 for _, intervals in rows
         if any(ix0 > best_x + 2 for ix0, ix1 in intervals)
     )
-    if left_rows < 5 or right_rows < 5:
-        return None
-    # Require at least 10% of rows on each side, AND the dominant side
-    # cannot be more than 90% of the total (otherwise it's a single column
-    # with scattered stragglers).
-    min_share = min(left_rows, right_rows) / len(rows)
-    if min_share < 0.10:
-        return None
-    return best_x
+
+    if sync_rows >= 6 and sync_rows / len(rows) >= 0.20:
+        return best_x
+    if (
+        left_only_rows >= 5
+        and right_only_rows >= 5
+        and left_only_rows / len(rows) >= 0.15
+        and right_only_rows / len(rows) >= 0.15
+    ):
+        return best_x
+    # Asymmetric / body+sidebar layout: one column dominates but the other
+    # has enough synchronized rows to prove the gutter is real. Catches
+    # pages where the main body is a single wide column and a short author
+    # bio sits in the other column (argyris1993 p.2) — without this, the
+    # sidebar interleaves into the body under PyMuPDF's default extraction.
+    if sync_rows >= 5 and (left_any_rows >= 20 or right_any_rows >= 20):
+        return best_x
+    return None
+
+
+def _row_has_gutter_gap(intervals, gutter, min_gap_width=6):
+    """Return True if `intervals` has a horizontal gap spanning `gutter`.
+
+    Merges overlapping intervals, then looks for a pair of consecutive
+    merged intervals where the gap between them straddles `gutter` and is
+    at least `min_gap_width` points wide. This is the geometric signature
+    of a column gutter: content ends on one side, whitespace crosses the
+    gutter, content resumes on the other side.
+    """
+    if not intervals:
+        return False
+    sorted_ivs = sorted(intervals, key=lambda iv: iv[0])
+    merged = [sorted_ivs[0]]
+    for a, b in sorted_ivs[1:]:
+        if a <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    for i in range(len(merged) - 1):
+        gap_start = merged[i][1]
+        gap_end = merged[i + 1][0]
+        if gap_start < gutter < gap_end and (gap_end - gap_start) >= min_gap_width:
+            return True
+    return False
 
 
 def _words_to_text(words):

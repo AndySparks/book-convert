@@ -1631,6 +1631,19 @@ def main():
         help="Skip dependency check",
     )
     parser.add_argument(
+        "--archive",
+        action="store_true",
+        help="After a successful conversion, move the source PDF from "
+             "input/ into archive/ (created if missing). Failed conversions "
+             "and --skip-existing skips are left in place.",
+    )
+    parser.add_argument(
+        "--archive-dir",
+        default="archive",
+        help="Directory to move successfully-converted PDFs into when "
+             "--archive is set (default: archive/)",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose/debug logging output",
@@ -1685,6 +1698,7 @@ def main():
     success = 0
     failed = 0
     skipped = 0
+    converted_pdfs = []  # successfully converted source paths, for --archive
 
     for pdf in pdfs:
         if args.skip_existing:
@@ -1696,6 +1710,7 @@ def main():
 
         if convert_pdf(pdf, output_dir, method=method, auto_ocr=args.auto_ocr):
             success += 1
+            converted_pdfs.append(pdf)
         else:
             failed += 1
         print()
@@ -1704,6 +1719,34 @@ def main():
     if skipped:
         parts.append(f"{skipped} skipped")
     print(f"Done. {', '.join(parts)}.")
+
+    # --archive: move successfully-converted PDFs into the archive dir.
+    # Only runs on success; failed conversions stay in input/ so the user
+    # can retry. Skip collisions by appending a timestamp suffix so we
+    # never overwrite an existing archived file.
+    if args.archive and converted_pdfs:
+        archive_dir = Path(args.archive_dir)
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        moved = 0
+        collisions = 0
+        for src in converted_pdfs:
+            dest = archive_dir / src.name
+            if dest.exists():
+                # Preserve the existing archived copy by suffixing the
+                # new one with a timestamp.
+                from datetime import datetime
+                ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+                dest = archive_dir / f"{src.stem}.{ts}{src.suffix}"
+                collisions += 1
+            try:
+                shutil.move(str(src), str(dest))
+                moved += 1
+            except Exception as e:
+                print(f"  Archive failed for {src.name}: {e}")
+        msg = f"Archived {moved} PDF(s) to {archive_dir}/"
+        if collisions:
+            msg += f" ({collisions} renamed to avoid collision)"
+        print(msg)
 
     sys.exit(1 if failed else 0)
 

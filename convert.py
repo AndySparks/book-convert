@@ -757,6 +757,251 @@ def clean_text(text):
     return '\n'.join(result)
 
 
+def _detect_two_column_split(page):
+    """Detect whether a page has a two-column layout.
+
+    Returns the x-coordinate of the column gutter, or None if the page is
+    a single column.
+
+    Uses word-level bboxes (not blocks) so that the detection works even
+    when PyMuPDF returns the entire body as a single merged block spanning
+    both columns. Finds the x-position near the page midpoint where the
+    highest fraction of rows have no word crossing through, and requires
+    that fraction to be high (>= 65%). For a single-column page, body
+    text spans the midpoint on most rows so no such gutter exists.
+    """
+    try:
+        words = page.get_text("words")
+    except Exception:
+        return None
+    if not words or len(words) < 30:
+        return None
+    page_width = page.rect.width
+    mid = page_width / 2
+
+    # Group words into rows, clustering y values within a tolerance so
+    # that words on the same visual line (with minor baseline variation)
+    # merge into one row. Without this, a single full-width line can split
+    # into two "rows" that each have only partial x coverage, producing
+    # false-positive gutters in single-column layouts.
+    clean = [
+        (w[0], w[1], w[2]) for w in words
+        if len(w) >= 5 and isinstance(w[4], str) and w[4].strip()
+    ]
+    if not clean:
+        return None
+    clean.sort(key=lambda w: w[1])
+    rows = []  # list of (y, [(x0, x1), ...])
+    row_tol = 3.0
+    for x0, y, x1 in clean:
+        if rows and abs(y - rows[-1][0]) <= row_tol:
+            rows[-1][1].append((x0, x1))
+        else:
+            rows.append((y, [(x0, x1)]))
+    if len(rows) < 8:
+        return None
+
+    # Scan a window near the midpoint for the x with the best "no crossing"
+    # coverage. Step in small increments so we can locate the gutter precisely
+    # (body column gaps are often only 6-12pt wide). Require high coverage
+    # (>= 75% of rows), AND require both sides to have substantial content so
+    # we don't mistake a single-column layout (where most rows happen to end
+    # before the midpoint due to ragged-right flush) for two columns.
+    window = page_width * 0.15
+    step = 2.0
+    best_x = None
+    best_coverage = 0
+    x = mid - window
+    while x <= mid + window:
+        count = 0
+        for _, intervals in rows:
+            if not any(ix0 < x < ix1 for ix0, ix1 in intervals):
+                count += 1
+        if count > best_coverage:
+            best_coverage = count
+            best_x = x
+        x += step
+
+    if best_x is None:
+        return None
+    if best_coverage / len(rows) < 0.75:
+        return None
+
+    # Both sides must have meaningful content. A single-column page can
+    # have high "no crossing" coverage if words happen to cluster on one
+    # side; require substantial rows with content wholly on each side.
+    # Threshold is asymmetric so we still pick up pages that are mostly
+    # one column with a biographical or figure-caption sidebar on the
+    # other side — if we miss those, PyMuPDF's default reading order
+    # interleaves the sidebar into the body.
+    left_rows = sum(
+        1 for _, intervals in rows
+        if any(ix1 < best_x - 2 for ix0, ix1 in intervals)
+    )
+    right_rows = sum(
+        1 for _, intervals in rows
+        if any(ix0 > best_x + 2 for ix0, ix1 in intervals)
+    )
+    if left_rows < 5 or right_rows < 5:
+        return None
+    # Require at least 10% of rows on each side, AND the dominant side
+    # cannot be more than 90% of the total (otherwise it's a single column
+    # with scattered stragglers).
+    min_share = min(left_rows, right_rows) / len(rows)
+    if min_share < 0.10:
+        return None
+    return best_x
+
+
+def _words_to_text(words):
+    """Reconstruct text from PyMuPDF word tuples, grouping into lines by y.
+
+    Words are (x0, y0, x1, y1, text, block_no, line_no, word_no). Lines are
+    separated by '\\n' so downstream line-oriented cleanup (paragraph join,
+    header stripping) continues to work.
+    """
+    if not words:
+        return ""
+    sorted_words = sorted(words, key=lambda w: (round(w[1]), w[0]))
+    lines = []
+    current_line = []
+    current_y = None
+    for w in sorted_words:
+        wy = round(w[1])
+        if current_y is None or abs(wy - current_y) > 2:
+            if current_line:
+                lines.append(" ".join(current_line))
+            current_line = [w[4]]
+            current_y = wy
+        else:
+            current_line.append(w[4])
+    if current_line:
+        lines.append(" ".join(current_line))
+    return "\n".join(lines)
+
+
+def _extract_page_text(page):
+    """Extract text from a page, respecting two-column layouts.
+
+    For single-column pages, returns the default top-to-bottom extraction.
+    For two-column pages, processes each block:
+      - Blocks that don't cross the column gutter (pure left or pure right)
+        are emitted as-is.
+      - Short blocks that cross the gutter are treated as full-width
+        (title, heading, abstract) and emitted as-is.
+      - Tall blocks that cross the gutter are "merged" body blocks where
+        PyMuPDF failed to separate the columns. These are split at the word
+        level: left-column words are emitted in y-order, then right-column
+        words, restoring the proper reading order.
+    Blocks are then sorted by (y_top, x_left) so headers, bylines, abstract,
+    body, and footnotes appear in the correct order.
+    """
+    split = _detect_two_column_split(page)
+    if split is None:
+        return page.get_text()
+
+    try:
+        blocks = page.get_text("blocks")
+        words = page.get_text("words")
+    except Exception:
+        return page.get_text()
+
+    text_blocks = [
+        b for b in blocks
+        if len(b) >= 5 and isinstance(b[4], str) and b[4].strip()
+    ]
+    if not text_blocks:
+        return page.get_text()
+
+    # Partition blocks by role so we can keep each column contiguous.
+    # PyMuPDF often fragments a 2-column page into one-line blocks per
+    # column; sorting everything by (y, x) would interleave the columns
+    # row-by-row and reproduce the very problem we're trying to avoid.
+    # The correct reading order is: full-width headers, then all of the
+    # left column top-to-bottom, then all of the right column top-to-bottom,
+    # then full-width footers.
+    MERGED_HEIGHT = 80
+    GUTTER_TOL = 5
+
+    left_col = []   # list of (y0, text) sorted by y0
+    right_col = []
+    full_width = []  # list of (y0, text) - short blocks spanning the gutter
+
+    for b in text_blocks:
+        x0, y0, x1, y1, btext = b[0], b[1], b[2], b[3], b[4]
+        height = y1 - y0
+        crosses = (x0 < split - GUTTER_TOL) and (x1 > split + GUTTER_TOL)
+
+        if crosses and height > MERGED_HEIGHT:
+            # Merged body block: split at the word level. Append the
+            # resulting halves to the column buffers so they read in the
+            # correct order alongside any genuine pure-left / pure-right
+            # blocks on the same page.
+            block_words = [
+                w for w in words
+                if len(w) >= 5 and isinstance(w[4], str) and w[4].strip()
+                and w[1] >= y0 - 2 and w[3] <= y1 + 2
+                and w[0] >= x0 - 2 and w[2] <= x1 + 2
+            ]
+            left_words = [w for w in block_words if w[0] < split]
+            right_words = [w for w in block_words if w[0] >= split]
+            left_text = _words_to_text(left_words)
+            right_text = _words_to_text(right_words)
+            if left_text:
+                ly0 = min((w[1] for w in left_words), default=y0)
+                left_col.append((ly0, left_text))
+            if right_text:
+                ry0 = min((w[1] for w in right_words), default=y0)
+                right_col.append((ry0, right_text))
+        elif crosses:
+            # Short full-width block (title, heading, caption, footnote).
+            full_width.append((y0, btext))
+        elif x1 <= split + GUTTER_TOL:
+            left_col.append((y0, btext))
+        else:
+            right_col.append((y0, btext))
+
+    left_col.sort(key=lambda e: e[0])
+    right_col.sort(key=lambda e: e[0])
+    full_width.sort(key=lambda e: e[0])
+
+    # Decide where each full-width block sits relative to column content.
+    # Headers end before the earliest column content; footers start after
+    # the latest column content; anything in between is "inline" and we
+    # place it after the left column so it still appears before the right
+    # column body (best-effort — full-width mid-page elements are rare).
+    col_y_min = min((e[0] for e in left_col + right_col), default=None)
+    col_y_max = None
+    if left_col or right_col:
+        col_y_max = max(
+            max((e[0] for e in left_col), default=float('-inf')),
+            max((e[0] for e in right_col), default=float('-inf')),
+        )
+
+    header_fw = []
+    footer_fw = []
+    inline_fw = []
+    for y0, text in full_width:
+        if col_y_min is None:
+            header_fw.append((y0, text))
+        elif y0 < col_y_min:
+            header_fw.append((y0, text))
+        elif col_y_max is not None and y0 > col_y_max:
+            footer_fw.append((y0, text))
+        else:
+            inline_fw.append((y0, text))
+
+    ordered = []
+    ordered.extend(header_fw)
+    ordered.extend(left_col)
+    ordered.extend(inline_fw)
+    ordered.extend(right_col)
+    ordered.extend(footer_fw)
+
+    parts = [t.strip() for _, t in ordered if t.strip()]
+    return "\n\n".join(parts) + "\n"
+
+
 def _strip_surrogates(text):
     """Remove lone UTF-16 surrogate code points from extracted text.
 
@@ -770,30 +1015,77 @@ def _strip_surrogates(text):
     return re.sub(r'[\ud800-\udfff]+', '', text)
 
 
+_PAGE_POINTER_RE = re.compile(r'^(?:p\.?\s*)?\d+\s*$', re.IGNORECASE)
+
+
+def _is_useful_toc(toc_entries):
+    """Decide whether an embedded TOC is worth emitting in the output.
+
+    Academic papers from JSTOR and similar services embed a fake TOC of
+    bare page pointers ("p. 1", "p. 2", ...) plus the whole journal
+    issue's article list. These have no value in the output markdown and
+    waste tokens.
+
+    Heuristics for rejection:
+      - All entries point at page <= 0 (PDF anchor targets, not real pages)
+      - More than half of entry titles match "p. N" page-pointer format
+      - All entries are at level 1 and the document has fewer than 30 pages
+        (short papers don't need a TOC at all)
+    """
+    if not toc_entries:
+        return False
+
+    # All zero/negative page targets = JSTOR-style anchor-only TOC
+    real_page_count = sum(1 for e in toc_entries if e[2] > 0)
+    if real_page_count == 0:
+        return False
+
+    # Count page-pointer-style titles
+    pointer_count = 0
+    for entry in toc_entries:
+        title = _strip_surrogates(entry[1] or '')
+        title = re.sub(r'[\t\u2003\u2002\u00a0]+', ' ', title).strip()
+        if _PAGE_POINTER_RE.match(title):
+            pointer_count += 1
+    if pointer_count > len(toc_entries) / 2:
+        return False
+
+    return True
+
+
 def _format_embedded_toc(toc_entries):
     """Format a fitz TOC (list of [level, title, page]) as markdown.
 
     Each entry is indented by level. Uses a non-numbered list so the output
     reads as a hierarchical outline. Normalizes any tab/ideographic spaces
     in titles (common in bookmarks that prefix chapter numbers) and strips
-    unpaired surrogate code points that some PDFs produce.
+    unpaired surrogate code points that some PDFs produce. Entries with
+    page-pointer-style titles ("p. 5") or non-positive page targets are
+    dropped since they come from JSTOR-style anchor TOCs that aren't useful.
     """
     if not toc_entries:
         return ""
     lines = ["## Table of Contents", ""]
+    emitted = 0
     for entry in toc_entries:
         # fitz returns [level, title, page] (3-tuple) or with extra dict (4)
         level = max(1, entry[0])
         title = entry[1]
         page = entry[2]
-        # Strip surrogates first, then collapse tab/ideographic-space
-        # separators PyMuPDF uses between chapter numbers and titles
         title = _strip_surrogates(title)
         title = re.sub(r'[\t\u2003\u2002\u00a0]+', ' ', title).strip()
         if not title:
             continue
+        # Skip bare page pointers and unresolved anchor targets
+        if _PAGE_POINTER_RE.match(title):
+            continue
+        if page <= 0:
+            continue
         indent = "  " * (level - 1)
         lines.append(f"{indent}- {title} (p. {page})")
+        emitted += 1
+    if emitted == 0:
+        return ""
     lines.append("")
     return "\n".join(lines)
 
@@ -861,10 +1153,13 @@ def convert_with_pymupdf(pdf_path, output_dir):
 
     pages_with_text = 0
 
-    # First pass: extract all page texts
+    # First pass: extract all page texts. _extract_page_text detects
+    # two-column layouts and extracts columns in reading order, which
+    # prevents PyMuPDF from interleaving left/right columns mid-sentence
+    # on journal-article pages.
     raw_pages = []
     for i in range(total_pages):
-        text = doc[i].get_text()
+        text = _extract_page_text(doc[i])
         # Strip any unpaired surrogate code points that PyMuPDF sometimes
         # surfaces from PDFs with overlong UTF-8 or non-standard font encodings
         text = _strip_surrogates(text)
@@ -889,12 +1184,19 @@ def convert_with_pymupdf(pdf_path, output_dir):
         f.write(f"*Source: {pdf_path.name}*\n\n")
         f.write("---\n\n")
 
-        # Emit embedded TOC at the top if available
-        if toc_entries:
-            f.write(_format_embedded_toc(toc_entries))
-            f.write("\n---\n\n")
+        # Emit embedded TOC at the top if it's actually useful. JSTOR-style
+        # per-page anchor TOCs and the issue's article list are suppressed.
+        emit_toc = _is_useful_toc(toc_entries)
+        if emit_toc:
+            formatted = _format_embedded_toc(toc_entries)
+            if formatted:
+                f.write(formatted)
+                f.write("\n---\n\n")
+            else:
+                emit_toc = False
 
-        # Only skip broken-TOC pages in the front matter (first 10% of pages).
+        # Only skip broken-TOC pages in the front matter (first 10% of pages)
+        # AND only when we actually have a replacement TOC to offer.
         # Back-of-book indexes share the same line pattern but contain
         # content the user needs for keyword lookup.
         toc_skip_cutoff = max(20, total_pages // 10)
@@ -909,7 +1211,7 @@ def convert_with_pymupdf(pdf_path, output_dir):
             # Skip pages that are mostly mangled TOC entries -- the
             # embedded bookmark TOC replaces them. Restricted to front
             # matter so back-of-book indexes are preserved.
-            if (toc_entries
+            if (emit_toc
                     and page_num <= toc_skip_cutoff
                     and _is_broken_toc_page(cleaned)):
                 skipped_toc_pages += 1

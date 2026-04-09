@@ -92,11 +92,25 @@ When `convert.py` sees a document that looks like a short, mostly-two-column pap
 
 This project includes a `CLAUDE.md` file, so [Claude Code](https://docs.anthropic.com/en/docs/claude-code) understands the project and can help you convert and clean up books. Just open the project directory in Claude Code and ask it to help convert your PDFs.
 
+## Running tests
+
+The repo has a small pytest suite under `tests/`. To run it:
+
+```bash
+source .venv/bin/activate
+pip install -r requirements-dev.txt   # first time only
+python -m pytest tests/ -v
+```
+
+The tests cover the text quality scorer that gates the pymupdf → OCR
+auto-fallback. See `docs/quality-fallback-design.md` for the design
+behind that feature.
+
 ## Tips
 
 - **Start with the default mode** (PyMuPDF). It's fast and works on any Python version.
 - **Use `--method marker`** if you have Python 3.10+ and want richer markdown formatting.
-- **Use `--ocr` only if** the default mode produces empty or garbled output -- this usually means the PDF is scanned/image-based. The tool will detect this and suggest OCR automatically.
+- **Use `--auto-ocr`** to have the tool automatically retry with OCR when pymupdf fails. This catches both fully-scanned PDFs and PDFs with non-standard font encodings that produce garbled text (e.g. ligature artifacts like `n1ethod` for `method`). Without `--auto-ocr` you'll get an error message suggesting `--method ocr` and can re-run manually.
 - **OCR output may need cleanup.** Claude Code can help you fix OCR artifacts, add proper headings, and improve formatting.
 - **Organize your output** into subdirectories by topic (e.g., `output/Coaching/`, `output/Writing/`) to keep things tidy.
 - **Use `--skip-existing`** when re-running on a directory to avoid re-converting files you already have.

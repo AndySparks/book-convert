@@ -2,7 +2,14 @@
 
 **Issue:** AndySparks/book-convert#17
 **Date:** 2026-04-09
-**Status:** Design approved, ready to plan implementation
+**Status:** Design approved, implementation in progress
+**Revision 2026-04-09:** Scorer redesigned mid-implementation. Wordlist-based
+scoring failed calibration because `/usr/share/dict/words` on macOS is
+Webster 1934 (no inflected forms), and ad-hoc stemming made the scorer too
+permissive to separate good files from Pyramid Principle. Replaced with an
+artifact density metric that counts specific font-encoding bigrams
+(`letter+digit+letter`, `letter+vv+letter`) per 10k chars. Pyramid has
+14.9 `n1`-in-word per 10k chars; good files have 0.0. See "Scorer" section.
 
 ## Problem
 

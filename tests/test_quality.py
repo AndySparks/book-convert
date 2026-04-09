@@ -1,0 +1,73 @@
+"""Tests for the text quality scoring module."""
+import convert
+
+
+# --- Quality scorer tests ---
+
+CLEAN_ENGLISH = """
+The organization's leadership must consider the behavior of employees
+across every department. A manager who understands the people on the
+team can build trust through clear communication. Performance improves
+when workers feel their contributions are recognized and their ideas
+are taken seriously by the executives. This principle appears in every
+major study of management practice over the past fifty years, from the
+earliest research on motivation to contemporary work on psychological
+safety and team effectiveness. Organizations that ignore it pay a cost
+in turnover, engagement, and productivity.
+""" * 3  # Repeat to ensure >=100 tokens
+
+
+MANGLED_TEXT = """
+The organi7ation leadersh1p n1ust consider the behavi0r of en1ployees
+across every departn1ent. A n1anager vvho understands the peop1e on the
+tean1 can bui1d trust through c1ear con1n1unication. Perforn1ance in1proves
+vvhen vvorkers fee1 their contribution1s are recogn1ized and their ideas
+are taken serious1y by the executi\\/es. This princip1e appears in every
+n1ajor study of managen1ent practice over the past fifty years, from the
+ear1iest research on n1otivation to conten1porary vvork on psycho1ogica1
+safety and tean1 effectiveness. Organi7ations that ignore it pay a cost
+in turnover, engagen1ent, and productivity.
+""" * 3
+
+
+def test_quality_clean_english_scores_high():
+    """A clean English paragraph scores >= 0.7."""
+    score = convert._text_quality_score(CLEAN_ENGLISH)
+    assert score >= 0.7, f"Expected >=0.7 for clean English, got {score:.3f}"
+
+
+def test_quality_mangled_text_scores_low():
+    """A mangled paragraph (ligature artifacts) scores < 0.5."""
+    score = convert._text_quality_score(MANGLED_TEXT)
+    assert score < 0.5, f"Expected <0.5 for mangled text, got {score:.3f}"
+
+
+def test_quality_short_text_returns_one():
+    """Text with fewer than 100 usable tokens returns exactly 1.0."""
+    # "the" x 50: 50 tokens total, below the 100 threshold
+    short = "the " * 50
+    score = convert._text_quality_score(short)
+    assert score == 1.0, f"Expected 1.0 for short text, got {score}"
+
+
+def test_quality_strips_markdown():
+    """Markdown syntax characters don't pollute the score."""
+    markdown = "# Heading\n\n" + CLEAN_ENGLISH + "\n\n* bullet\n* another\n"
+    score = convert._text_quality_score(markdown)
+    assert score >= 0.7, f"Markdown should not drag score down, got {score:.3f}"
+
+
+def test_quality_strips_trailing_punctuation():
+    """Words with trailing punctuation (word., word,) are still counted."""
+    text = ("organization, management, leadership, business, strategy, "
+            "performance, team, people, process, system. " * 15)
+    score = convert._text_quality_score(text)
+    # Every token after stripping punctuation is a real word -> ~1.0
+    assert score >= 0.9, f"Expected >=0.9 for punctuated real words, got {score:.3f}"
+
+
+def test_quality_strips_page_markers():
+    """HTML page markers (<!-- Page N -->) don't contribute tokens."""
+    text = "<!-- Page 1 -->\n\n" + CLEAN_ENGLISH
+    score = convert._text_quality_score(text)
+    assert score >= 0.7

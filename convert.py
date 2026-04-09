@@ -151,6 +151,75 @@ def clean_title(stem):
 
 MIN_TEXT_RATIO = 0.1  # At least 10% of pages must have extractable text
 
+# Minimum quality score for a pymupdf extraction to be accepted without
+# falling back to OCR. Scored by _text_quality_score (artifact density).
+# Calibrated against:
+#   The Human Side of Enterprise (good pymupdf):   1.000
+#   The Functions of the Executive (good OCR):     0.943
+#   The Pyramid Principle (bad pymupdf, mangled):  0.000
+# 0.5 leaves a 0.44+ margin on the good side and 0.5 on the bad side.
+# See docs/quality-fallback-design.md for the rationale.
+QUALITY_THRESHOLD = 0.5
+
+
+# --- Text quality scoring ---
+# Regex for stripping markdown syntax before measuring artifact density.
+# Strips: HTML comments (<!-- ... -->), heading/bullet/emphasis markers,
+# table pipes, backticks, and horizontal rules.
+_MARKDOWN_STRIP_RE = re.compile(
+    r'<!--.*?-->|[#*_`|]+|^-{3,}$',
+    re.MULTILINE | re.DOTALL
+)
+
+# Font-encoding artifact patterns. Each match counts as one artifact.
+# These are the specific extraction bugs we've seen in the wild from
+# PyMuPDF on PDFs with non-standard Type 3 fonts or custom encodings.
+# Density (matches per 10k chars) is the signal we gate on.
+_ARTIFACT_PATTERNS = (
+    # Letter-digit-letter: e.g. "managen1ent", "con1panies", "n1ethod".
+    # Legitimate English words never have this pattern.
+    re.compile(r'[a-z]\d[a-z]', re.IGNORECASE),
+    # "vv" between letters: e.g. "hovvever", "vvriting", "vve".
+    # Extraction substitutes "vv" for "w" when the PDF font lacks a ToUnicode
+    # map for U+0077. Legit "vv" in English is vanishingly rare.
+    re.compile(r'[a-z]vv[a-z]', re.IGNORECASE),
+)
+
+
+def _text_quality_score(text, min_chars=500):
+    """Return a 0.0-1.0 quality score for extracted text.
+
+    Higher is better. Computed from the density of known PyMuPDF font-encoding
+    artifacts (letter-digit-letter, "vv" between letters) per 10k characters.
+    Zero artifacts -> 1.0. 2+ artifacts per 10k chars -> 0.0. Linear between.
+
+    Returns 1.0 when there is too little text to judge (< `min_chars`),
+    to avoid flagging short or image-heavy docs.
+
+    The scorer is deterministic: same input -> same score.
+    """
+    # Strip markdown syntax so page markers and bullets don't dilute the
+    # character-count denominator with non-content chars.
+    cleaned = _MARKDOWN_STRIP_RE.sub(' ', text)
+    n_chars = len(cleaned)
+
+    # Too little text to judge -- refuse to flag.
+    if n_chars < min_chars:
+        return 1.0
+
+    artifacts = sum(
+        len(pattern.findall(cleaned)) for pattern in _ARTIFACT_PATTERNS
+    )
+    density_per_10k = artifacts * 10000 / n_chars
+
+    # Score: 1.0 at zero density, 0.0 at 2.0+ per 10k chars, linear between.
+    # The 2.0 ceiling is calibrated against real data:
+    #   Human Side (good pymupdf): 0.0 per 10k
+    #   Functions of Executive (OCR): 0.0 per 10k
+    #   Pyramid Principle (bad pymupdf): ~19.5 per 10k (n1 + vv combined)
+    # Any density above ~1.0 means the extraction is broken.
+    return max(0.0, 1.0 - density_per_10k / 2.0)
+
 
 def _is_structural_line(stripped):
     """Check if a line is a structural markdown element that should not be joined."""
@@ -1340,6 +1409,21 @@ def convert_with_pymupdf(pdf_path, output_dir):
             f"This PDF may be scanned. Try: --method ocr"
         )
 
+    # Check text quality: catches PDFs with non-standard font encodings that
+    # produce extractable-but-garbled output (e.g. "n1ethod" for "method").
+    # When quality is low we raise a ConversionError the caller can catch
+    # and route to OCR via the auto_ocr fallback.
+    extracted = output_file.read_text(encoding="utf-8", errors="replace")
+    quality = _text_quality_score(extracted)
+    log.debug("Text quality score: %.3f", quality)
+    if quality < QUALITY_THRESHOLD:
+        output_file.unlink(missing_ok=True)
+        raise ConversionError(
+            f"Low quality text extraction (score: {quality:.2f}, "
+            f"threshold: {QUALITY_THRESHOLD:.2f}). This PDF may have "
+            f"non-standard font encoding. Try: --method ocr"
+        )
+
     print(f"  -> {output_file}")
 
     # Hint: if this document looks like an academic paper (majority of pages
@@ -1502,7 +1586,9 @@ def convert_pdf(pdf_path, output_dir, method="pymupdf", auto_ocr=False):
         else:
             return convert_with_pymupdf(pdf_path, output_dir)
     except ConversionError as e:
-        if auto_ocr and method != "ocr" and "scanned" in str(e).lower():
+        error_msg = str(e).lower()
+        auto_ocr_triggers = ("scanned", "low quality")
+        if auto_ocr and method != "ocr" and any(t in error_msg for t in auto_ocr_triggers):
             print(f"  Text extraction failed, auto-retrying with OCR...")
             try:
                 check_dependencies("ocr")

@@ -1008,11 +1008,18 @@ def _extract_page_text(page):
             # resulting halves to the column buffers so they read in the
             # correct order alongside any genuine pure-left / pure-right
             # blocks on the same page.
+            #
+            # Filter by block_no (word[5]) rather than bounding box so we
+            # don't double-count words that live in neighboring overlapping
+            # blocks. For example, a drop-cap title block often has a bbox
+            # that overlaps the first few rows of the body block; the drop
+            # cap's own words belong to block_no N while the body belongs
+            # to block_no M, so bbox-based filtering would pull in both.
+            block_no = b[5] if len(b) > 5 else None
             block_words = [
                 w for w in words
-                if len(w) >= 5 and isinstance(w[4], str) and w[4].strip()
-                and w[1] >= y0 - 2 and w[3] <= y1 + 2
-                and w[0] >= x0 - 2 and w[2] <= x1 + 2
+                if len(w) >= 6 and isinstance(w[4], str) and w[4].strip()
+                and (block_no is None or w[5] == block_no)
             ]
             left_words = [w for w in block_words if w[0] < split]
             right_words = [w for w in block_words if w[0] >= split]
@@ -1062,15 +1069,24 @@ def _extract_page_text(page):
         else:
             inline_fw.append((y0, text))
 
-    ordered = []
-    ordered.extend(header_fw)
-    ordered.extend(left_col)
-    ordered.extend(inline_fw)
-    ordered.extend(right_col)
-    ordered.extend(footer_fw)
-
-    parts = [t.strip() for _, t in ordered if t.strip()]
-    return "\n\n".join(parts) + "\n"
+    # Join entries with single newlines within each segment (so clean_text
+    # can re-flow wrapped visual lines into paragraphs) but double newlines
+    # between segments (so header, columns, and footer stay distinct).
+    # PyMuPDF frequently returns one block per visual line on column pages;
+    # if we used "\n\n" between blocks, every line would become its own
+    # paragraph and clean_text's line-joining heuristic wouldn't fire.
+    segments = []
+    if header_fw:
+        segments.append("\n".join(t.strip() for _, t in header_fw if t.strip()))
+    if left_col:
+        segments.append("\n".join(t.strip() for _, t in left_col if t.strip()))
+    if inline_fw:
+        segments.append("\n".join(t.strip() for _, t in inline_fw if t.strip()))
+    if right_col:
+        segments.append("\n".join(t.strip() for _, t in right_col if t.strip()))
+    if footer_fw:
+        segments.append("\n".join(t.strip() for _, t in footer_fw if t.strip()))
+    return "\n\n".join(s for s in segments if s) + "\n"
 
 
 def _strip_surrogates(text):

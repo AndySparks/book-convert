@@ -751,6 +751,68 @@ def clean_text(text):
     return '\n'.join(result)
 
 
+def _format_embedded_toc(toc_entries):
+    """Format a fitz TOC (list of [level, title, page]) as markdown.
+
+    Each entry is indented by level. Uses a non-numbered list so the output
+    reads as a hierarchical outline. Normalizes any tab/ideographic spaces
+    in titles (common in bookmarks that prefix chapter numbers).
+    """
+    if not toc_entries:
+        return ""
+    lines = ["## Table of Contents", ""]
+    for entry in toc_entries:
+        # fitz returns [level, title, page] (3-tuple) or with extra dict (4)
+        level = max(1, entry[0])
+        title = entry[1]
+        page = entry[2]
+        # Collapse tab / ideographic-space separators PyMuPDF uses between
+        # chapter numbers and titles
+        title = re.sub(r'[\t\u2003\u2002\u00a0]+', ' ', title).strip()
+        indent = "  " * (level - 1)
+        lines.append(f"{indent}- {title} (p. {page})")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _is_broken_toc_page(text):
+    """Detect pages that consist mostly of mangled TOC entries.
+
+    After text extraction + bullet normalization, dotted-leader TOC entries
+    look like "- Title ... pagenum" or similar. If most non-empty lines on
+    a page match this pattern, we classify it as a broken TOC page and
+    skip it in favor of the embedded bookmark-based TOC.
+    """
+    non_empty = [l.strip() for l in text.split('\n') if l.strip()]
+    if len(non_empty) < 5:
+        return False
+
+    # Patterns for TOC-like lines:
+    #   "- Title ... 42"            (post-normalization)
+    #   "Title ....... 42"          (raw dotted leader)
+    #   "- Figure ... 1"            (list-of-figures fragments)
+    #   "Chapter 1 ... 42"
+    toc_line = re.compile(
+        r'^(?:-\s+)?(?:.+?)\s+(?:\.{2,}|…)\s*\d+\s*$'
+    )
+    # Also match lines that are a label + trailing number with no leader
+    #   "- Figure ... 7"
+    label_num = re.compile(
+        r'^-\s+(?:Figure|Table|Chapter|Part|Section)\s*\.*\s*\d+\s*$',
+        re.IGNORECASE,
+    )
+    bare_label_num = re.compile(
+        r'^-?\s*(?:Figure|Table|Chapter|Part|Section)\s+\d+\s*$',
+        re.IGNORECASE,
+    )
+
+    matches = sum(
+        1 for line in non_empty
+        if toc_line.match(line) or label_num.match(line) or bare_label_num.match(line)
+    )
+    return matches / len(non_empty) >= 0.5
+
+
 def convert_with_pymupdf(pdf_path, output_dir):
     """Convert a PDF using PyMuPDF (fitz) for text extraction.
 
@@ -765,6 +827,14 @@ def convert_with_pymupdf(pdf_path, output_dir):
 
     title = clean_title(pdf_path.stem)
     output_file = output_dir / f"{pdf_path.stem}.md"
+
+    # Extract embedded TOC (bookmark tree) before closing the doc.
+    # This sidesteps pdf-text-extraction mangling of dotted-leader TOCs.
+    try:
+        toc_entries = doc.get_toc()
+    except Exception as e:
+        log.debug("Could not read embedded TOC: %s", e)
+        toc_entries = []
 
     pages_with_text = 0
 
@@ -783,11 +853,23 @@ def convert_with_pymupdf(pdf_path, output_dir):
     # Strip running headers/footers across all pages
     cleaned_pages = _strip_running_headers(raw_pages)
 
+    skipped_toc_pages = 0
+
     with open(output_file, "w", encoding="utf-8") as f:
         f.write(f"# {title}\n\n")
         f.write("*Converted from PDF*\n\n")
         f.write(f"*Source: {pdf_path.name}*\n\n")
         f.write("---\n\n")
+
+        # Emit embedded TOC at the top if available
+        if toc_entries:
+            f.write(_format_embedded_toc(toc_entries))
+            f.write("\n---\n\n")
+
+        # Only skip broken-TOC pages in the front matter (first 10% of pages).
+        # Back-of-book indexes share the same line pattern but contain
+        # content the user needs for keyword lookup.
+        toc_skip_cutoff = max(20, total_pages // 10)
 
         for page_num, text in cleaned_pages:
             cleaned = clean_text(text)
@@ -796,9 +878,21 @@ def convert_with_pymupdf(pdf_path, output_dir):
             # Skip blank pages (no content after cleaning)
             if not cleaned.strip():
                 continue
+            # Skip pages that are mostly mangled TOC entries -- the
+            # embedded bookmark TOC replaces them. Restricted to front
+            # matter so back-of-book indexes are preserved.
+            if (toc_entries
+                    and page_num <= toc_skip_cutoff
+                    and _is_broken_toc_page(cleaned)):
+                skipped_toc_pages += 1
+                log.debug("Skipping broken TOC page %d", page_num)
+                continue
             f.write(f"<!-- Page {page_num} -->\n\n")
             f.write(cleaned)
             f.write("\n\n")
+
+    if skipped_toc_pages:
+        print(f"  Replaced {skipped_toc_pages} broken TOC page(s) with embedded bookmark TOC")
 
     # Check if we got enough text to consider this a real conversion
     if total_pages > 0 and (pages_with_text / total_pages) < MIN_TEXT_RATIO:

@@ -93,11 +93,46 @@ def check_dependencies(method):
             raise DependencyError("\n".join(lines))
 
 
+_WORD_ORDINALS = (
+    r'first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth'
+)
+_EDITION_QUALIFIERS = (
+    r'annotated|revised|reissue|updated|expanded|enlarged|new|'
+    + _WORD_ORDINALS
+)
+
+
 def clean_title(stem):
-    """Derive a clean book title from the PDF filename stem."""
-    title = re.sub(r'\s*[Vv]\d+(\.\d+)?\s*$', '', stem)
-    title = re.sub(r'\s*\d+(st|nd|rd|th)\s+[Ee]dition\s*$', '', title)
-    title = re.sub(r'\s*\([^)]*[Ee]dition[^)]*\)\s*$', '', title)
+    """Derive a clean book title from the PDF filename stem.
+
+    Strips common trailing version markers (e.g. "4th Edition", "Annotated
+    Edition", "V3") and any leftover punctuation from the separator that
+    preceded them.
+    """
+    title = stem
+    # Apply version-marker strippers repeatedly so compound patterns like
+    # "3rd Annotated Edition" get fully removed.
+    prev = None
+    while prev != title:
+        prev = title
+        title = re.sub(r'\s*[Vv]\d+(\.\d+)?\s*$', '', title)
+        title = re.sub(r'\s*\d+(st|nd|rd|th)\s+[Ee]dition\s*$', '', title)
+        title = re.sub(
+            r'\s*(?:' + _EDITION_QUALIFIERS + r')\s+[Ee]dition\s*$',
+            '',
+            title,
+            flags=re.IGNORECASE,
+        )
+        title = re.sub(
+            r'\s*(?:' + _EDITION_QUALIFIERS + r')\s*$',
+            '',
+            title,
+            flags=re.IGNORECASE,
+        )
+        title = re.sub(r'\s*\([^)]*[Ee]dition[^)]*\)\s*$', '', title)
+        # Strip trailing separator punctuation left behind by the strippers
+        # (e.g. "Title, 4th Edition" -> "Title," -> "Title")
+        title = re.sub(r'[,;:\-\s]+$', '', title)
     return title.strip()
 
 

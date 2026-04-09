@@ -709,12 +709,17 @@ def clean_text(text):
                 break
             i += 1
 
+    # Lines that start a list item should absorb their continuation lines
+    # into the same paragraph (the PDF wraps them across physical lines).
+    list_item_pattern = re.compile(r'^(\s*)(?:[-*]\s|\d+[\.\)]\s)')
+
     while i < len(lines):
         line = lines[i]
         stripped = line.strip()
 
-        # Preserve structural lines as-is
-        if _is_structural_line(stripped):
+        # Headings, page markers, blockquotes, fences, etc. stay as-is.
+        # List items are structural but still need continuation joining.
+        if _is_structural_line(stripped) and not list_item_pattern.match(line):
             result.append(line)
             i += 1
             continue
@@ -724,7 +729,8 @@ def clean_text(text):
             next_line = lines[i + 1]
             next_stripped = next_line.strip()
 
-            # Stop joining at structural elements or blank lines
+            # Stop joining at structural elements or blank lines (including
+            # the next list item, which is itself structural)
             if _is_structural_line(next_stripped):
                 break
 

@@ -52,6 +52,19 @@ def check_dependencies(method):
             raise DependencyError("Missing dependency: PyMuPDF (pip install pymupdf)")
 
     elif method == "marker":
+        # marker-pdf uses PEP 604 syntax (X | None) in its type hints, which
+        # requires Python 3.10+. Fail early with a clear message rather than
+        # surfacing a confusing TypeError from deep inside the import chain.
+        if sys.version_info < (3, 10):
+            raise DependencyError(
+                "marker-pdf requires Python 3.10 or newer (current venv is "
+                f"{sys.version_info.major}.{sys.version_info.minor}).\n"
+                "  Either:\n"
+                "    - Use the default pymupdf method (drop --papers / --method marker), or\n"
+                "    - Create a Python 3.12 venv and reinstall: "
+                "python3.12 -m venv .venv-marker && "
+                ".venv-marker/bin/pip install marker-pdf"
+            )
         try:
             result = subprocess.run(
                 ["marker_single", "--help"],
@@ -1152,6 +1165,7 @@ def convert_with_pymupdf(pdf_path, output_dir):
         toc_entries = []
 
     pages_with_text = 0
+    two_col_pages = 0
 
     # First pass: extract all page texts. _extract_page_text detects
     # two-column layouts and extracts columns in reading order, which
@@ -1159,7 +1173,12 @@ def convert_with_pymupdf(pdf_path, output_dir):
     # on journal-article pages.
     raw_pages = []
     for i in range(total_pages):
-        text = _extract_page_text(doc[i])
+        page = doc[i]
+        # Track how many pages look two-column so we can hint the user
+        # toward --papers / marker-pdf for likely academic papers.
+        if _detect_two_column_split(page) is not None:
+            two_col_pages += 1
+        text = _extract_page_text(page)
         # Strip any unpaired surrogate code points that PyMuPDF sometimes
         # surfaces from PDFs with overlong UTF-8 or non-standard font encodings
         text = _strip_surrogates(text)
@@ -1233,6 +1252,28 @@ def convert_with_pymupdf(pdf_path, output_dir):
         )
 
     print(f"  -> {output_file}")
+
+    # Hint: if this document looks like an academic paper (majority of pages
+    # detect as two-column AND it's short enough to plausibly be a paper),
+    # suggest --papers for users on Python 3.10+. We never auto-switch; the
+    # user opts in explicitly to keep behavior predictable.
+    if (
+        total_pages > 0
+        and total_pages <= 60
+        and two_col_pages / total_pages >= 0.5
+    ):
+        py_ok = sys.version_info >= (3, 10)
+        if py_ok:
+            print(
+                "  Note: this looks like an academic paper. For higher-quality "
+                "output, try --papers (routes to marker-pdf)."
+            )
+        else:
+            print(
+                "  Note: this looks like an academic paper. --papers would use "
+                "marker-pdf but requires Python 3.10+ (current: "
+                f"{sys.version_info.major}.{sys.version_info.minor})."
+            )
     return True
 
 
@@ -1470,6 +1511,15 @@ def main():
         action="store_true",
         help="Shortcut for --method ocr",
     )
+    # --papers routes academic papers through marker-pdf, which has much
+    # better layout analysis than the default pymupdf path. Requires
+    # Python 3.10+ (enforced by check_dependencies) because marker-pdf
+    # uses PEP 604 type-hint syntax.
+    parser.add_argument(
+        "--papers",
+        action="store_true",
+        help="Shortcut for --method marker (for academic papers; requires Python 3.10+)",
+    )
     parser.add_argument(
         "--clean",
         action="store_true",
@@ -1523,7 +1573,15 @@ def main():
             sys.exit(1)
         sys.exit(0)
 
-    method = "ocr" if args.ocr else args.method
+    if args.ocr and args.papers:
+        print("Error: --ocr and --papers are mutually exclusive")
+        sys.exit(1)
+    if args.ocr:
+        method = "ocr"
+    elif args.papers:
+        method = "marker"
+    else:
+        method = args.method
 
     if not args.skip_check:
         try:

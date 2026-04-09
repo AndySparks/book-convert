@@ -751,12 +751,26 @@ def clean_text(text):
     return '\n'.join(result)
 
 
+def _strip_surrogates(text):
+    """Remove lone UTF-16 surrogate code points from extracted text.
+
+    Some PDFs store text that PyMuPDF surfaces with unpaired surrogates
+    (U+D800..U+DFFF) -- this happens with overlong UTF-8 sequences or
+    non-standard embedded fonts. These code points cannot be encoded as
+    valid UTF-8, so they crash the output file write. Strip them.
+    """
+    if not text:
+        return text
+    return re.sub(r'[\ud800-\udfff]+', '', text)
+
+
 def _format_embedded_toc(toc_entries):
     """Format a fitz TOC (list of [level, title, page]) as markdown.
 
     Each entry is indented by level. Uses a non-numbered list so the output
     reads as a hierarchical outline. Normalizes any tab/ideographic spaces
-    in titles (common in bookmarks that prefix chapter numbers).
+    in titles (common in bookmarks that prefix chapter numbers) and strips
+    unpaired surrogate code points that some PDFs produce.
     """
     if not toc_entries:
         return ""
@@ -766,9 +780,12 @@ def _format_embedded_toc(toc_entries):
         level = max(1, entry[0])
         title = entry[1]
         page = entry[2]
-        # Collapse tab / ideographic-space separators PyMuPDF uses between
-        # chapter numbers and titles
+        # Strip surrogates first, then collapse tab/ideographic-space
+        # separators PyMuPDF uses between chapter numbers and titles
+        title = _strip_surrogates(title)
         title = re.sub(r'[\t\u2003\u2002\u00a0]+', ' ', title).strip()
+        if not title:
+            continue
         indent = "  " * (level - 1)
         lines.append(f"{indent}- {title} (p. {page})")
     lines.append("")
@@ -842,6 +859,9 @@ def convert_with_pymupdf(pdf_path, output_dir):
     raw_pages = []
     for i in range(total_pages):
         text = doc[i].get_text()
+        # Strip any unpaired surrogate code points that PyMuPDF sometimes
+        # surfaces from PDFs with overlong UTF-8 or non-standard font encodings
+        text = _strip_surrogates(text)
         if text.strip():
             pages_with_text += 1
             raw_pages.append((i + 1, text.strip()))
@@ -855,7 +875,9 @@ def convert_with_pymupdf(pdf_path, output_dir):
 
     skipped_toc_pages = 0
 
-    with open(output_file, "w", encoding="utf-8") as f:
+    # errors="replace" is a safety net for any surrogate chars that slip
+    # through the explicit _strip_surrogates() calls above
+    with open(output_file, "w", encoding="utf-8", errors="replace") as f:
         f.write(f"# {title}\n\n")
         f.write("*Converted from PDF*\n\n")
         f.write(f"*Source: {pdf_path.name}*\n\n")
@@ -996,7 +1018,7 @@ def convert_with_ocr(pdf_path, output_dir):
     total_pages = info["Pages"]
     print(f"  {total_pages} pages")
 
-    with open(output_file, "w", encoding="utf-8") as f:
+    with open(output_file, "w", encoding="utf-8", errors="replace") as f:
         f.write(f"# {title}\n\n")
         f.write("*Converted from PDF using OCR*\n\n")
         f.write(f"*Source: {pdf_path.name}*\n\n")

@@ -12,8 +12,8 @@ Three conversion methods:
 ### 1. Clone and set up Python environment
 
 ```bash
-git clone https://github.com/AndySparks/BookConvert.git
-cd BookConvert
+git clone https://github.com/AndySparks/book-convert.git
+cd book-convert
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -48,9 +48,19 @@ python convert.py input/
 
 ```bash
 python convert.py input/MyBook.pdf --method marker    # Use marker-pdf (needs Python 3.10+)
-python convert.py input/ScannedBook.pdf --method ocr   # Use OCR for scanned PDFs
-python convert.py input/ScannedBook.pdf --ocr          # Shortcut for --method ocr
+python convert.py input/MyBook.pdf --papers           # Shortcut for --method marker
+python convert.py input/ScannedBook.pdf --method ocr  # Use OCR for scanned PDFs
+python convert.py input/ScannedBook.pdf --ocr         # Shortcut for --method ocr
 ```
+
+### Archive source PDFs after conversion
+
+```bash
+python convert.py input/ --archive                    # Move converted PDFs into archive/
+python convert.py input/ --archive --archive-dir old/ # Custom archive location
+```
+
+Failed conversions and `--skip-existing` skips are left in `input/`. Name collisions in the archive are preserved by appending a timestamp to the new copy.
 
 ### Skip already-converted files
 
@@ -68,9 +78,15 @@ python convert.py input/MyBook.pdf --output output/Philosophy/
 
 1. Drop your PDF(s) into the `input/` folder
 2. Run `convert.py` -- it uses **PyMuPDF** by default for fast, reliable text extraction
-3. For higher-quality markdown formatting, use `--method marker` (requires Python 3.10+)
+3. For higher-quality markdown formatting, use `--method marker` or `--papers` (requires Python 3.10+)
 4. For scanned books (where the pages are images), use `--method ocr` or `--ocr`
 5. Converted markdown appears in `output/`
+
+### Academic papers
+
+The PyMuPDF pipeline detects two-column layouts and reconstructs the reading order so journal articles don't come out with left and right columns interleaved. This works on clean two-column pages, merged-block pages where PyMuPDF returns both columns as one giant block, and body-plus-sidebar pages with an inset author bio. See `docs/paper-extraction-research.md` and `docs/paper-extraction-decision.md` for the detection approach and the trade-offs vs. marker-pdf.
+
+When `convert.py` sees a document that looks like a short, mostly-two-column paper, it prints a one-line hint suggesting `--papers` for higher-quality output (on Python 3.10+).
 
 ## Using with Claude Code
 
@@ -88,9 +104,11 @@ This project includes a `CLAUDE.md` file, so [Claude Code](https://docs.anthropi
 ## Project structure
 
 ```
-BookConvert/
+book-convert/
   input/          <- Drop your PDFs here
   output/         <- Converted markdown files appear here
+  archive/        <- Optional: --archive moves converted source PDFs here
+  docs/           <- Design notes (paper extraction research, decisions, results)
   convert.py      <- Main conversion script
   requirements.txt
   CLAUDE.md       <- Instructions for Claude Code

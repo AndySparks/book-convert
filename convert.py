@@ -238,6 +238,133 @@ def _fix_missing_spaces(text):
     return text
 
 
+# Curated wordlist for splitting joined all-caps headings. Focuses on
+# words common in book titles: articles, prepositions, conjunctions, and
+# vocabulary found on title pages / chapter headings.
+_JOINED_CAPS_WORDS = frozenset(w.lower() for w in (
+    # articles, prepositions, conjunctions, pronouns
+    "a an the and or but of in on at by for to from with without into onto "
+    "over under up down out off as is are was were be been being am i you "
+    "we us our your their his her its this that these those if then than "
+    "so not no yes all any some each every other another such which who "
+    "what when where why how also"
+).split() + [
+    # title-page vocabulary
+    "annotated", "revised", "updated", "expanded", "enlarged", "edition",
+    "introduction", "foreword", "preface", "acknowledgments", "contents",
+    "chapter", "part", "section", "appendix", "index", "bibliography",
+    "copyright", "published", "volume", "series", "reissue", "first",
+    "second", "third", "fourth", "fifth", "complete", "abridged",
+    "unabridged", "illustrated", "author", "authors", "editor", "editors",
+    "translated", "translator", "publisher",
+    # common book / management title words
+    "human", "side", "enterprise", "management", "leadership", "organization",
+    "organizations", "organizational", "behavior", "science", "business",
+    "history", "culture", "economy", "economics", "theory", "practice",
+    "principles", "method", "methods", "system", "systems", "model",
+    "models", "analysis", "study", "research", "guide", "handbook",
+    "overview", "fundamentals", "essentials", "foundations", "thinking",
+    "decision", "making", "strategy", "strategic", "tactical", "innovation",
+    "design", "development", "growth", "change", "transition", "work",
+    "workplace", "team", "teams", "group", "groups", "people", "person",
+    "leader", "leaders", "manager", "managers", "founder", "founders",
+    "company", "companies", "corporation", "project", "process", "product",
+    "quality", "productivity", "performance", "operations", "crisis",
+    "modern", "contemporary", "global", "local", "drive", "motivate",
+    "motivation", "inspire", "inspiration", "purpose", "new", "old",
+    # proper nouns commonly appearing in title pages
+    "mcgregor", "deming", "pink", "daniel", "douglas", "edwards",
+])
+
+
+def _segment_joined_caps(word):
+    """Split a run of joined letters into dictionary words via DP.
+
+    Returns a list of segments if a valid segmentation is found, else None.
+    A valid segmentation uses only words from the curated list, prefers
+    fewer segments, and requires at least two segments.
+    """
+    n = len(word)
+    if n < 6:
+        return None
+
+    lower = word.lower()
+    # dp[i] = (segment_count, prev_index, matched_segment) for best split of word[:i]
+    dp = [None] * (n + 1)
+    dp[0] = (0, -1, None)
+
+    for i in range(1, n + 1):
+        # Try every possible previous boundary j < i where word[j:i] is a word.
+        for j in range(max(0, i - 15), i):
+            if dp[j] is None:
+                continue
+            candidate = lower[j:i]
+            if len(candidate) < 2:
+                # Only allow 'a' and 'i' as standalone single-char words
+                if candidate not in ("a", "i"):
+                    continue
+            if candidate not in _JOINED_CAPS_WORDS:
+                continue
+            count = dp[j][0] + 1
+            if dp[i] is None or count < dp[i][0]:
+                dp[i] = (count, j, word[j:i])
+
+    if dp[n] is None:
+        return None
+
+    # Reconstruct
+    segments = []
+    idx = n
+    while idx > 0:
+        _, prev, seg = dp[idx]
+        segments.append(seg)
+        idx = prev
+    segments.reverse()
+
+    # Require at least two segments and at most one single-char segment
+    if len(segments) < 2:
+        return None
+    if sum(1 for s in segments if len(s) == 1) > 1:
+        return None
+    return segments
+
+
+def _split_joined_caps(text):
+    """Split joined ALL-CAPS words on heading-like lines.
+
+    PyMuPDF sometimes extracts letter-spaced (tracked-out) headings with
+    spacing collapsed, producing "THEHUMANSIDE" from "T H E  H U M A N  S I D E".
+    Finds short, mostly-uppercase lines containing a run of joined letters
+    and splits them using a curated English wordlist.
+
+    Only applies to lines that look like headings (short, standalone,
+    mostly uppercase) to avoid corrupting body prose.
+    """
+    join_pattern = re.compile(r'\b[A-Z]{6,}\b')
+
+    def _rewrite_line(line):
+        stripped = line.strip()
+        if not stripped or len(stripped) > 80:
+            return line
+        alpha_chars = [c for c in stripped if c.isalpha()]
+        if not alpha_chars:
+            return line
+        upper_ratio = sum(1 for c in alpha_chars if c.isupper()) / len(alpha_chars)
+        if upper_ratio < 0.8:
+            return line
+
+        def _sub(match):
+            word = match.group(0)
+            segments = _segment_joined_caps(word)
+            if segments is None:
+                return word
+            return ' '.join(segments)
+
+        return join_pattern.sub(_sub, line)
+
+    return '\n'.join(_rewrite_line(l) for l in text.split('\n'))
+
+
 def _collapse_spaced_letters(text):
     """Collapse spaced-out letter artifacts back into words.
 
@@ -564,6 +691,7 @@ def clean_text(text):
     text = _fix_ligatures(text)
     text = _fix_missing_spaces(text)
     text = _collapse_spaced_letters(text)
+    text = _split_joined_caps(text)
     text = _normalize_bullets(text)
 
     lines = text.split('\n')

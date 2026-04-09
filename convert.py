@@ -888,12 +888,27 @@ def _detect_two_column_split(page):
         and right_only_rows / len(rows) >= 0.15
     ):
         return best_x
-    # Asymmetric / body+sidebar layout: one column dominates but the other
-    # has enough synchronized rows to prove the gutter is real. Catches
-    # pages where the main body is a single wide column and a short author
-    # bio sits in the other column (argyris1993 p.2) — without this, the
-    # sidebar interleaves into the body under PyMuPDF's default extraction.
+    # Asymmetric / body+sidebar layout (variant A): the main body is a
+    # single wide column and a short author bio sits in the other column,
+    # with the bio's y-range overlapping the body so some rows are
+    # "synchronized". argyris1993 p.2 is the canonical case.
     if sync_rows >= 5 and (left_any_rows >= 20 or right_any_rows >= 20):
+        return best_x
+    # Asymmetric / body+sidebar layout (variant B): the bio is a dedicated
+    # 3-8 line block in one column, the body fills the other column, and
+    # the y-ranges don't align closely enough to produce many synchronized
+    # rows. argyris1989 p.2 is the canonical case: Lo=4, Ro=38, sync=3.
+    # Accept as long as both columns have at least 3 dedicated rows AND
+    # one side has 25+ rows of content AND there's at least some sync
+    # evidence (sync + smaller dedicated count >= 5). This still rejects
+    # single-column ragged pages (e.g. book indexes) because those have
+    # zero dedicated rows in the empty "right column".
+    if (
+        left_only_rows >= 3
+        and right_only_rows >= 3
+        and max(left_any_rows, right_any_rows) >= 25
+        and sync_rows + min(left_only_rows, right_only_rows) >= 5
+    ):
         return best_x
     return None
 

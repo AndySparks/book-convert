@@ -2,6 +2,8 @@
 
 This project converts PDF books to clean Markdown files for use in Claude Projects and other LLM tools.
 
+**Read @docs/TASKS.md** at session start for the rolling punch list of work in flight. BookConvert does not carry a full STRATEGY.md; strategic context lives upstream in Management Craft's `docs/STRATEGY.md` under the MC Research Loop Acquire step.
+
 ## Workflow
 
 1. User places PDF(s) in the `input/` directory

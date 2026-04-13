@@ -629,6 +629,159 @@ def _strip_running_headers(pages_text):
     return result
 
 
+def _merge_split_caps_headings(lines):
+    """Merge runs of consecutive short ALL-CAPS lines into single heading lines.
+
+    PyMuPDF sometimes extracts a heading like "THE CASE FOR SECRETS" or
+    "THE CHALLENGE OF THE FUTURE" as multiple separate lines ("THE" /
+    "CASE FOR SECRETS" or "THE" / "CHALLENGE" / "OF THE" / "FUTURE"),
+    one word-or-phrase per line. This happens when the PDF uses
+    tracked-out letter spacing or stacked typography for headings.
+
+    We merge any run of 2+ consecutive short (<= 40 char) ALL-CAPS lines
+    into a single line. The merged line then flows through _format_headings
+    and gets promoted to a markdown heading like every other caps heading.
+
+    Not a perfect signal — two adjacent all-caps proper nouns (e.g.
+    "NEW YORK" / "HONG KONG" in a list) could merge — but this shape is
+    rare in book body text and common in chapter/section titles, so the
+    tradeoff favors merging.
+    """
+    caps_re = re.compile(r'^[A-Z][A-Z\s:&,\-\']{0,40}$')
+    result = []
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if caps_re.match(stripped) and len(stripped) <= 40:
+            run = [stripped]
+            j = i + 1
+            while j < len(lines):
+                next_stripped = lines[j].strip()
+                if caps_re.match(next_stripped) and len(next_stripped) <= 40:
+                    run.append(next_stripped)
+                    j += 1
+                else:
+                    break
+            if len(run) >= 2 and sum(len(r) + 1 for r in run) <= 80:
+                result.append(' '.join(run))
+                i = j
+                continue
+        result.append(lines[i])
+        i += 1
+    return result
+
+
+def _promote_bookmark_headings(text, titles):
+    """Promote bookmark titles to markdown headings at the top of a page.
+
+    The PDF bookmark tree (doc.get_toc()) is the author's own declaration
+    of where chapters begin and what they're called. When a bookmark points
+    at this page, we search the first 20 lines for the title text and
+    replace it with a `##` heading. Two modes:
+
+      (1) Multi-line split: PyMuPDF extracted the title across separate
+          lines (e.g. "THE" / "CHALLENGE" / "OF THE" / "FUTURE"). We merge
+          those lines into a single heading.
+
+      (2) Mid-line prefix: PyMuPDF ran the title into the first paragraph
+          as a single long line (e.g. "PARTY LIKE IT'S 1999 OUR CONTRARIAN
+          QUESTION—What important truth…"). We split that line at the end
+          of the title, promote the title to a heading, and put the rest
+          back as body text.
+
+    Matching is whitespace/punctuation-insensitive. Leading numerals
+    ("1. ", "Chapter 1: ") are stripped from the bookmark title before
+    searching. Match must end at a word boundary so we never bisect a
+    real word. Heading text preserves the PDF's original casing.
+    """
+    if not titles or not text:
+        return text
+
+    lines = text.split('\n')
+    for title in titles:
+        clean_title = re.sub(
+            r'^(?:chapter\s+\d+[.:]?\s*|part\s+\d+[.:]?\s*|\d+[.)]\s*)',
+            '',
+            title.strip(),
+            flags=re.IGNORECASE,
+        ).strip()
+        if not clean_title:
+            continue
+        target = re.sub(r'[^a-z0-9]', '', clean_title.lower())
+        if len(target) < 4:
+            continue
+
+        # Walk lines char-by-char through the first ~20 lines, accumulating
+        # normalized alnum chars. When accumulation contains the target,
+        # record the line and char position where the match ends.
+        acc = ''
+        first_content_idx = None
+        last_content_idx = None
+        split_point = None  # char index in last consumed line's stripped form
+        matched = False
+
+        for idx in range(min(20, len(lines))):
+            stripped = lines[idx].strip()
+            if not stripped or stripped.startswith('<!-- Page'):
+                continue
+            if stripped.startswith('#'):
+                break
+            if first_content_idx is None:
+                first_content_idx = idx
+
+            for char_idx, ch in enumerate(stripped):
+                if ch.isalnum():
+                    acc += ch.lower()
+                if target in acc:
+                    matched = True
+                    last_content_idx = idx
+                    split_point = char_idx + 1
+                    break
+            if matched:
+                break
+            last_content_idx = idx
+            if len(acc) > len(target) + 40:
+                break
+
+        if not (matched and first_content_idx is not None):
+            continue
+
+        last_line_stripped = lines[last_content_idx].strip()
+        # Require match to end at a word boundary — never split a real word.
+        if split_point < len(last_line_stripped) and last_line_stripped[split_point].isalnum():
+            continue
+
+        # Build heading text from consumed content in the PDF's own casing.
+        heading_parts = []
+        for idx in range(first_content_idx, last_content_idx):
+            stripped = lines[idx].strip()
+            if stripped and not stripped.startswith('<!-- Page'):
+                heading_parts.append(stripped)
+        heading_prefix = last_line_stripped[:split_point].rstrip(' \t.,:;-')
+        if heading_prefix:
+            heading_parts.append(heading_prefix)
+        heading_text = ' '.join(heading_parts).strip()
+        if not heading_text:
+            continue
+
+        body_suffix = last_line_stripped[split_point:].lstrip(' \t.,:;-')
+
+        new_lines = list(lines[:first_content_idx])
+        new_lines.append(f"## {heading_text}")
+        for idx in range(first_content_idx + 1, last_content_idx):
+            stripped = lines[idx].strip()
+            if not stripped or stripped.startswith('<!-- Page'):
+                new_lines.append(lines[idx])
+        if body_suffix:
+            new_lines.append('')
+            new_lines.append(body_suffix)
+        new_lines.extend(lines[last_content_idx + 1:])
+        lines = new_lines
+        break  # one bookmark promotion per page
+
+    return '\n'.join(lines)
+
+
 def _format_headings(text):
     """Detect and format section headings as markdown.
 
@@ -636,8 +789,13 @@ def _format_headings(text):
     - ALL-CAPS lines (short, standalone)
     - "Chapter N" / "Part N" patterns
     - Short standalone lines before body text
+
+    Runs _merge_split_caps_headings first to join split-caps heading
+    fragments (e.g. "THE" / "CASE FOR SECRETS" -> "THE CASE FOR SECRETS")
+    so the single-line heading detector below can match them.
     """
     lines = text.split('\n')
+    lines = _merge_split_caps_headings(lines)
     result = []
 
     for i, line in enumerate(lines):
@@ -758,7 +916,73 @@ def _normalize_bullets(text):
     return text
 
 
-def clean_text(text):
+def _looks_like_list_page(raw_text):
+    """Detect pages that are dense lists of short entries (book indexes,
+    glossaries, bibliographies) rather than prose paragraphs.
+
+    On such pages, clean_text's paragraph-joining logic collapses every
+    entry onto a single line. We preserve newlines on these pages so each
+    entry stays on its own line.
+
+    Heuristics (all must hold):
+      - 10+ non-empty content lines
+      - 80%+ of content lines are short (<80 chars) and don't end with
+        sentence-ending punctuation
+      - Average content-line length is under 50 chars
+      - Either the top-level entries are alphabetically mostly-sorted
+        (classic index) OR the average line is very short (<25 chars,
+        glossary/bibliography shape). Sub-entries are skipped for the
+        ordering check because they start with prepositions/articles
+        ("and capitalism", "ideology of", "as war") and break sort order.
+    """
+    if not raw_text:
+        return False
+    content_lines = [
+        ln.strip() for ln in raw_text.split('\n')
+        if ln.strip() and not ln.strip().startswith('<!-- ')
+    ]
+    if len(content_lines) < 10:
+        return False
+
+    short_non_terminal = sum(
+        1 for ln in content_lines
+        if len(ln) < 80 and ln[-1] not in '.!?:;'
+    )
+    if short_non_terminal / len(content_lines) < 0.8:
+        return False
+
+    avg_len = sum(len(ln) for ln in content_lines) / len(content_lines)
+    if avg_len >= 50:
+        return False
+
+    # Sub-entry filter: index sub-entries start with common stopwords
+    # that break alphabetical order ("and", "as", "at", "by", "for", "in",
+    # "of", "on", "to", "with", "the") or start with lowercase.
+    SUBENTRY_LEADERS = {
+        'and', 'as', 'at', 'by', 'for', 'from', 'in', 'into', 'of',
+        'on', 'or', 'the', 'to', 'with', 'vs', 'see'
+    }
+    top_level = []
+    for ln in content_lines:
+        if not ln[0].isalpha():
+            continue
+        if ln[0].islower():
+            continue
+        first_word = re.match(r'[A-Za-z]+', ln).group(0).lower()
+        if first_word in SUBENTRY_LEADERS:
+            continue
+        top_level.append(ln[0].lower())
+
+    if len(top_level) >= 8:
+        ordered = sum(1 for a, b in zip(top_level, top_level[1:]) if a <= b)
+        if ordered / (len(top_level) - 1) >= 0.75:
+            return True
+
+    # Glossary/bibliography shape: every line is very short on average.
+    return avg_len < 25
+
+
+def clean_text(text, preserve_newlines=False):
     """Post-process extracted text to fix common PDF conversion artifacts.
 
     Joins all lines within a paragraph into single long lines. A paragraph
@@ -768,6 +992,11 @@ def clean_text(text):
 
     Also fixes ligatures, split-word artifacts, hyphenated word breaks, and
     soft hyphens. Preserves YAML frontmatter (between --- fences) untouched.
+
+    If preserve_newlines is True, runs the character-level fixes (ligatures,
+    missing spaces, etc.) but skips paragraph-joining, so each source line
+    stays on its own line. Used for index/glossary/bibliography pages where
+    each entry is a standalone line.
     """
     # Fix ligatures, split words, missing spaces, spaced-out letters, and bullets
     text = _fix_ligatures(text)
@@ -775,6 +1004,9 @@ def clean_text(text):
     text = _collapse_spaced_letters(text)
     text = _split_joined_caps(text)
     text = _normalize_bullets(text)
+
+    if preserve_newlines:
+        return text
 
     lines = text.split('\n')
     result = []
@@ -1322,6 +1554,15 @@ def convert_with_pymupdf(pdf_path, output_dir):
         log.debug("Could not read embedded TOC: %s", e)
         toc_entries = []
 
+    # Build a map of page number -> bookmark titles that start on that page.
+    # _promote_bookmark_headings uses this to promote chapter titles to
+    # markdown headings even when PyMuPDF extracts the title as multiple
+    # split lines (e.g. "THE" / "CHALLENGE" / "OF THE" / "FUTURE").
+    page_bookmarks = {}
+    for entry in toc_entries:
+        if len(entry) >= 3 and isinstance(entry[2], int) and entry[2] > 0:
+            page_bookmarks.setdefault(entry[2], []).append(entry[1])
+
     pages_with_text = 0
     two_col_pages = 0
 
@@ -1379,7 +1620,19 @@ def convert_with_pymupdf(pdf_path, output_dir):
         toc_skip_cutoff = max(20, total_pages // 10)
 
         for page_num, text in cleaned_pages:
-            cleaned = clean_text(text)
+            # Detect index/glossary-style list pages so we can preserve
+            # newlines instead of collapsing every entry into one paragraph.
+            # Skip this in the front matter so _format_toc + broken-TOC
+            # detection can still replace the printed Contents page with
+            # the embedded bookmark TOC.
+            in_front_matter = emit_toc and page_num <= toc_skip_cutoff
+            is_list = (not in_front_matter) and _looks_like_list_page(text)
+            cleaned = clean_text(text, preserve_newlines=is_list)
+            # Use the bookmark tree to promote chapter titles to `##` even
+            # when PyMuPDF extracts them as multi-line fragments.
+            cleaned = _promote_bookmark_headings(
+                cleaned, page_bookmarks.get(page_num, [])
+            )
             cleaned = _format_headings(cleaned)
             cleaned = _format_toc(cleaned)
             # Skip blank pages (no content after cleaning)

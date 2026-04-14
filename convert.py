@@ -69,12 +69,31 @@ def check_dependencies(method):
         # --help`. The marker CLI loads its ML models at import time, so
         # `--help` routinely takes 30+ seconds on a cold start and trips a
         # 10s subprocess timeout even when marker is working fine.
+        #
+        # Look for `marker_single` in this order:
+        #   1. The sys.executable's sibling bin directory (so running
+        #      `.venv-marker/bin/python convert.py` finds
+        #      `.venv-marker/bin/marker_single` without needing the venv
+        #      to be activated on PATH).
+        #   2. PATH itself (for users who've activated the venv).
+        # The venv-sibling lookup matters because running bookconvert
+        # from a non-activated venv is the common case in tools and
+        # scripts, and requiring activation introduces a class of silent
+        # failures when the caller forgets `source`.
         import shutil
-        if shutil.which("marker_single") is None:
+        import os as _os
+        venv_bin = Path(sys.executable).parent
+        marker_bin = venv_bin / "marker_single"
+        marker_on_path = shutil.which("marker_single")
+        if not marker_bin.exists() and marker_on_path is None:
             raise DependencyError(
                 "Missing dependency: marker-pdf (pip install marker-pdf).\n"
-                "  Expected to find the `marker_single` binary on PATH."
+                f"  Looked for `marker_single` in {venv_bin} and on PATH."
             )
+        # If the venv-sibling binary exists but isn't on PATH, add it so
+        # convert_with_marker() can spawn it via plain subprocess.run.
+        if marker_bin.exists() and marker_on_path is None:
+            _os.environ["PATH"] = str(venv_bin) + _os.pathsep + _os.environ.get("PATH", "")
         try:
             import marker  # noqa: F401
         except ImportError:

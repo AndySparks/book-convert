@@ -1267,6 +1267,412 @@ def _words_to_text(words):
     return "\n".join(lines)
 
 
+# --- Table detection and grid reconstruction -------------------------------
+#
+# Many books embed comparison tables with captions like "TABLE 9-1" followed
+# by a borderless grid of cells. PyMuPDF's default text extraction reads
+# such tables column-by-column (because the columns are narrow), which
+# produces a vertical stream of one-cell-per-line text that loses the
+# grid structure entirely.
+#
+# These helpers use the word-level coordinates PyMuPDF exposes to recover
+# the grid: cluster words into visual rows by y, bin by x-column, merge
+# continuation rows where a cell wraps across multiple visual rows, and
+# emit a markdown table. The caption pattern is used as both a detection
+# anchor and a region-bound estimator.
+
+_TABLE_CAPTION_RE = re.compile(
+    r'^\s*(?:TABLE|Table|TAB\.|Tab\.)\s+\d+(?:[-.]\d+)?\.?\s*$'
+)
+
+
+def _cluster_visual_rows(words, y_tol=3):
+    """Group PyMuPDF word tuples into visual rows by y-coordinate.
+
+    A visual row is a set of words whose y0 values fall within `y_tol`
+    points of each other. Rows are returned sorted top-to-bottom; words
+    within a row are sorted left-to-right.
+    """
+    if not words:
+        return []
+    sorted_ws = sorted(words, key=lambda w: (w[1], w[0]))
+    rows = [[sorted_ws[0]]]
+    for w in sorted_ws[1:]:
+        row_y = min(x[1] for x in rows[-1])
+        if abs(w[1] - row_y) <= y_tol:
+            rows[-1].append(w)
+        else:
+            rows.append([w])
+    for row in rows:
+        row.sort(key=lambda w: w[0])
+    return rows
+
+
+def _cluster_1d(values, tol):
+    """Cluster a sorted 1D list into groups where gaps < tol merge."""
+    if not values:
+        return []
+    sorted_vals = sorted(values)
+    clusters = [[sorted_vals[0]]]
+    for v in sorted_vals[1:]:
+        if v - clusters[-1][-1] < tol:
+            clusters[-1].append(v)
+        else:
+            clusters.append([v])
+    return [sum(c) / len(c) for c in clusters]
+
+
+def _looks_like_prose_row(row_words, page_width):
+    """Heuristic: does this visual row look like a paragraph of running prose?
+
+    Used to find where a table region ends and body text resumes. Prose
+    rows have many words, span most of the page width, begin near the
+    left margin, and — crucially — contain multi-character English words
+    with lowercase letters. Table data rows can span the full width with
+    ten "words", but those words are mostly single-character symbols
+    (√, H, M, ___) or short proper nouns, so their average word length
+    is short and they carry few lowercase words.
+    """
+    if len(row_words) < 8:
+        return False
+    x_min = min(w[0] for w in row_words)
+    x_max = max(w[2] for w in row_words)
+    if x_min > 100:  # prose starts near the left margin
+        return False
+    if (x_max - x_min) < page_width * 0.55:  # prose spans wide
+        return False
+    # Distinguish prose from a full-width data row packed with symbols:
+    # real prose has several lowercase-initial words and a non-trivial
+    # average word length.
+    texts = [w[4] for w in row_words]
+    total_chars = sum(len(t) for t in texts)
+    avg_len = total_chars / len(texts) if texts else 0
+    if avg_len < 3.5:
+        return False
+    lowercase_words = sum(1 for t in texts if t and t[0].islower())
+    if lowercase_words < 3:
+        return False
+    return True
+
+
+def _get_page_lines(page):
+    """Return a flat list of (y, x, text) triples for every text line on the page.
+
+    Uses PyMuPDF's dict-format extraction so each table cell (which PDF
+    producers typically encode as its own text line with its own bbox)
+    stays intact as a single entry with its real x-position. This is
+    much more faithful than word-level clustering for recovering table
+    structure, because multi-word cells like "Teledyne return" arrive
+    as one entry rather than two phantom columns.
+    """
+    try:
+        d = page.get_text("dict")
+    except Exception:
+        return []
+    out = []
+    for block in d.get("blocks", []):
+        for line in block.get("lines", []):
+            spans = line.get("spans", [])
+            text = "".join(s.get("text", "") for s in spans).strip()
+            if not text:
+                continue
+            bbox = line.get("bbox") or (0, 0, 0, 0)
+            out.append((bbox[1], bbox[0], text))
+    out.sort(key=lambda t: (round(t[0]), t[1]))
+    return out
+
+
+def _cluster_lines_to_rows(lines, y_tol=4):
+    """Group (y, x, text) line triples into visual rows by y-coordinate."""
+    if not lines:
+        return []
+    rows = [[lines[0]]]
+    for entry in lines[1:]:
+        row_y = min(e[0] for e in rows[-1])
+        if abs(entry[0] - row_y) <= y_tol:
+            rows[-1].append(entry)
+        else:
+            rows.append([entry])
+    for r in rows:
+        r.sort(key=lambda e: e[1])
+    return rows
+
+
+def _row_is_decorative(row):
+    """True if a row only contains decorative punctuation (e.g., '. . .').
+
+    Book designers often drop an ornamental separator below a table or
+    between table and prose. Letting it leak into the final row of the
+    markdown grid produces outputs like 'Hedgehog . . .'.
+    """
+    text = " ".join(e[2] for e in row).strip()
+    if not text:
+        return True
+    if any(ch.isalnum() for ch in text):
+        return False
+    return True
+
+
+def _row_looks_like_prose(row, page_width):
+    """True if a row of (y,x,text) line entries reads like a prose paragraph.
+
+    Uses `dict`-level line entries. A prose row consists of a single line
+    entry — PDF producers encode each full-width paragraph line as one
+    line with a single bbox. Table rows, even when cells contain long
+    text, have multiple entries at different x positions (one per cell).
+    The dict-level structure already separates them for us.
+    """
+    if len(row) != 1:
+        return False
+    entry = row[0]
+    text = entry[2]
+    tokens = text.split()
+    if len(tokens) < 8:
+        return False
+    if entry[1] > 100:  # prose starts near the left margin
+        return False
+    total_chars = sum(len(t) for t in tokens)
+    avg_len = total_chars / len(tokens)
+    if avg_len < 3.5:
+        return False
+    lowercase_words = sum(1 for t in tokens if t and t[0].islower())
+    if lowercase_words < 3:
+        return False
+    return True
+
+
+def _find_table_regions(page):
+    """Locate table regions on a page and return them as markdown.
+
+    Returns a list of (start_y, end_y, markdown) tuples sorted top-to-bottom.
+    start_y/end_y are in PDF point coordinates so callers can exclude
+    those regions from normal text extraction.
+
+    Detection is anchored on a "TABLE N-N" caption row. The region
+    extends from the caption's y down to the first subsequent visual row
+    that looks like running prose. Lines inside the region are grouped
+    into a grid using x-centers derived from the highest-density data
+    rows (headers are then assigned to the nearest data column), with
+    sparse continuation rows folded upward into their parent row.
+    """
+    lines = _get_page_lines(page)
+    if not lines:
+        return []
+
+    page_width = float(page.rect.width)
+    page_height = float(page.rect.height)
+
+    visual_rows = _cluster_lines_to_rows(lines, y_tol=4)
+    if not visual_rows:
+        return []
+
+    regions = []
+    i = 0
+    while i < len(visual_rows):
+        row_text = " ".join(e[2] for e in visual_rows[i]).strip()
+        if not _TABLE_CAPTION_RE.match(row_text):
+            i += 1
+            continue
+
+        cap_y = min(e[0] for e in visual_rows[i])
+        cap_label = row_text.strip()
+
+        # Optional sub-caption (the table's title) sits on the very next
+        # visual row when present. It goes above the grid as a bold line.
+        subtitle = None
+        data_start = i + 1
+        if data_start < len(visual_rows):
+            nr = visual_rows[data_start]
+            nr_text = " ".join(e[2] for e in nr).strip()
+            if (
+                nr_text
+                and len(nr_text) < 80
+                and not nr_text.endswith(".")
+                and len(nr) <= 3
+                and min(e[1] for e in nr) < page_width * 0.5
+            ):
+                subtitle = nr_text
+                data_start += 1
+
+        # Walk forward until we find a prose row (table end) or hit
+        # page bottom. The prose row itself is NOT part of the table.
+        # Decorative separators (e.g., ". . .") also terminate the region
+        # so they don't get mistaken for cell content in the final row.
+        data_end = data_start
+        end_y = page_height
+        while data_end < len(visual_rows):
+            row = visual_rows[data_end]
+            if _row_looks_like_prose(row, page_width):
+                end_y = min(e[0] for e in row)
+                break
+            if _row_is_decorative(row):
+                end_y = min(e[0] for e in row)
+                break
+            data_end += 1
+
+        data_rows = visual_rows[data_start:data_end]
+        if len(data_rows) < 2:
+            i = data_end
+            continue
+
+        markdown = _build_markdown_table(data_rows, cap_label, subtitle)
+        if markdown is None:
+            i = data_end
+            continue
+
+        regions.append((cap_y, end_y, markdown))
+        i = data_end
+
+    return regions
+
+
+def _build_markdown_table(visual_rows, caption, subtitle):
+    """Reconstruct a markdown table from a list of dict-level visual rows.
+
+    Each `visual_rows[i]` is a list of (y, x, text) triples representing
+    the cell-lines on one visual row. Column centers are estimated from
+    the most-populated rows (which are typically the primary data rows),
+    then every row's cells are assigned to the nearest column. Sparse
+    continuation rows (where a cell wraps across visual rows) are merged
+    upward into their parent row.
+
+    Returns None if the region does not look like a real table.
+    """
+    # The columns in the logical table come from the densest data rows;
+    # headers can have one fewer cell than the data row they sit above
+    # (e.g., because the CEO-name column has no header). Taking column
+    # x-positions from only the dense rows avoids polluting the column
+    # set with phantom positions from wrapped header words.
+    densities = [len(r) for r in visual_rows]
+    peak = max(densities) if densities else 0
+    if peak < 3:
+        return None
+    primary_rows = [r for r in visual_rows if len(r) >= max(3, peak - 1)]
+    if not primary_rows:
+        return None
+
+    primary_x = sorted(e[1] for r in primary_rows for e in r)
+    col_centers = _cluster_1d(primary_x, tol=15)
+    if len(col_centers) < 2 or len(col_centers) > 12:
+        return None
+
+    ncols = len(col_centers)
+
+    def assign_col(x):
+        return min(range(ncols), key=lambda k: abs(x - col_centers[k]))
+
+    grid = []
+    for row in visual_rows:
+        cells = [[] for _ in range(ncols)]
+        for _y, x, text in row:
+            cells[assign_col(x)].append(text)
+        grid.append([" ".join(c).strip() for c in cells])
+
+    merged = _merge_continuation_rows(grid)
+    if len(merged) < 2:
+        return None
+
+    # Reject grids where no row has multiple filled cells — that's what
+    # happens when we mistake a run of body prose for a table.
+    if max((sum(1 for c in r if c.strip()) for r in merged), default=0) < 2:
+        return None
+
+    return _rows_to_markdown(merged, caption, subtitle)
+
+
+def _merge_continuation_rows(grid):
+    """Merge sparse continuation rows upward.
+
+    When a cell's content wraps across multiple visual rows (e.g., a CEO
+    name split as "Henry" / "Singleton"), PyMuPDF emits each wrapped line
+    as its own visual row. A continuation row has very few non-empty
+    cells relative to a fully populated row; we detect those and fold
+    them into the preceding row by appending each cell's content.
+    """
+    if not grid:
+        return grid
+
+    # Determine the "typical" row density so we can call out sparse rows.
+    densities = [sum(1 for c in r if c.strip()) for r in grid]
+    if not densities:
+        return grid
+    peak = max(densities)
+    sparse_threshold = max(2, peak // 2)
+
+    merged = [list(grid[0])]
+    for row, density in zip(grid[1:], densities[1:]):
+        prev_density = sum(1 for c in merged[-1] if c.strip())
+        is_sparse = density <= sparse_threshold and prev_density >= sparse_threshold + 1
+        if is_sparse and merged:
+            for idx, cell in enumerate(row):
+                if cell.strip():
+                    if merged[-1][idx].strip():
+                        merged[-1][idx] = merged[-1][idx] + " " + cell.strip()
+                    else:
+                        merged[-1][idx] = cell.strip()
+        else:
+            merged.append(list(row))
+    return merged
+
+
+def _rows_to_markdown(rows, caption, subtitle):
+    """Emit a markdown table with an optional bold caption line above."""
+    if not rows:
+        return None
+    ncols = max(len(r) for r in rows)
+    # Pad short rows so the grid is rectangular.
+    for r in rows:
+        while len(r) < ncols:
+            r.append("")
+
+    def fmt_cell(cell):
+        cell = cell.strip().replace("|", "\\|")
+        return cell if cell else " "
+
+    def fmt_row(r):
+        return "| " + " | ".join(fmt_cell(c) for c in r) + " |"
+
+    lines = []
+    header_line = caption
+    if subtitle:
+        header_line = f"{caption} — {subtitle}" if caption else subtitle
+    if header_line:
+        lines.append(f"**{header_line}**")
+        lines.append("")
+    lines.append(fmt_row(rows[0]))
+    lines.append("|" + "|".join(["---"] * ncols) + "|")
+    for r in rows[1:]:
+        lines.append(fmt_row(r))
+    return "\n".join(lines)
+
+
+def _extract_page_text_with_tables(page, tables):
+    """Stitch markdown tables back into the page text.
+
+    Uses `page.get_text(clip=...)` to pull the non-table regions separately
+    so the flattened column-by-column extraction of the table region is
+    excluded. Segments are concatenated in top-to-bottom order.
+    """
+    import fitz
+    rect = page.rect
+    segments = []
+    cursor_y = rect.y0
+    for start_y, end_y, md in tables:
+        if start_y > cursor_y + 1:
+            clip = fitz.Rect(rect.x0, cursor_y, rect.x1, start_y)
+            chunk = page.get_text("text", clip=clip)
+            if chunk.strip():
+                segments.append(chunk.rstrip())
+        segments.append(md)
+        cursor_y = end_y
+    if cursor_y < rect.y1:
+        clip = fitz.Rect(rect.x0, cursor_y, rect.x1, rect.y1)
+        chunk = page.get_text("text", clip=clip)
+        if chunk.strip():
+            segments.append(chunk.rstrip())
+    return "\n\n".join(s for s in segments if s) + "\n"
+
+
 def _extract_page_text(page):
     """Extract text from a page, respecting two-column layouts.
 
@@ -1285,6 +1691,14 @@ def _extract_page_text(page):
     """
     split = _detect_two_column_split(page)
     if split is None:
+        # Single-column page: try to recover any "TABLE N-N" grids first.
+        # When a caption is detected and the grid reconstructs cleanly we
+        # splice markdown tables into the page text via clipped extraction
+        # so the flattened column-by-column dump is replaced with a real
+        # grid.
+        tables = _find_table_regions(page)
+        if tables:
+            return _extract_page_text_with_tables(page, tables)
         return page.get_text()
 
     try:

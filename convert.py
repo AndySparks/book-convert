@@ -991,7 +991,13 @@ def _looks_like_list_page(raw_text):
             continue
         if ln[0].islower():
             continue
-        first_word = re.match(r'[A-Za-z]+', ln).group(0).lower()
+        # `ln[0].isalpha()` accepts Unicode letters but the ASCII regex only
+        # matches [A-Za-z]. Lines starting with accented letters (École,
+        # Übung) or non-Latin scripts pass the .isalpha() guard but produce
+        # None from re.match, which used to crash. Fall back to the raw
+        # first character when the ASCII regex misses.
+        m = re.match(r'[A-Za-z]+', ln)
+        first_word = m.group(0).lower() if m else ln[0].lower()
         if first_word in SUBENTRY_LEADERS:
             continue
         top_level.append(ln[0].lower())

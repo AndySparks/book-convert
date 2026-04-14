@@ -65,19 +65,24 @@ def check_dependencies(method):
                 "python3.12 -m venv .venv-marker && "
                 ".venv-marker/bin/pip install marker-pdf"
             )
-        try:
-            result = subprocess.run(
-                ["marker_single", "--help"],
-                capture_output=True,
-                timeout=10,
+        # Use a static existence check rather than invoking `marker_single
+        # --help`. The marker CLI loads its ML models at import time, so
+        # `--help` routinely takes 30+ seconds on a cold start and trips a
+        # 10s subprocess timeout even when marker is working fine.
+        import shutil
+        if shutil.which("marker_single") is None:
+            raise DependencyError(
+                "Missing dependency: marker-pdf (pip install marker-pdf).\n"
+                "  Expected to find the `marker_single` binary on PATH."
             )
-            if result.returncode != 0:
-                raise DependencyError(
-                    "marker-pdf is installed but marker_single --help returned "
-                    f"exit code {result.returncode}. Try reinstalling: pip install marker-pdf"
-                )
-        except FileNotFoundError:
-            raise DependencyError("Missing dependency: marker-pdf (pip install marker-pdf)")
+        try:
+            import marker  # noqa: F401
+        except ImportError:
+            raise DependencyError(
+                "Missing dependency: marker-pdf is not importable in this "
+                "Python. Activate the marker venv (source .venv-marker/bin/activate) "
+                "or reinstall: pip install marker-pdf"
+            )
 
     elif method == "ocr":
         missing = []
@@ -126,18 +131,36 @@ def clean_title(stem):
     # Apply version-marker strippers repeatedly so compound patterns like
     # "3rd Annotated Edition" get fully removed.
     prev = None
+    # Optional adverbs that decorate compound edition phrases. Standalone
+    # they are NOT trailing junk (the regex below only matches them when
+    # followed by an actual qualifier word).
+    adverb_prefix = r'(?:fully|completely|newly|partially|extensively)\s+'
+    qualifier_chain = (
+        r'(?:' + _EDITION_QUALIFIERS + r')'
+        r'(?:\s*(?:,|and|&)\s*'
+        r'(?:' + adverb_prefix + r')?'
+        r'(?:' + _EDITION_QUALIFIERS + r'))*'
+    )
     while prev != title:
         prev = title
         title = re.sub(r'\s*[Vv]\d+(\.\d+)?\s*$', '', title)
         title = re.sub(r'\s*\d+(st|nd|rd|th)\s+[Ee]dition\s*$', '', title)
+        # Numbered Anniversary Edition: "10th Anniversary Edition"
         title = re.sub(
-            r'\s*(?:' + _EDITION_QUALIFIERS + r')\s+[Ee]dition\s*$',
+            r'\s*\d+(?:st|nd|rd|th)\s+Anniversary\s+[Ee]dition\s*$',
             '',
             title,
             flags=re.IGNORECASE,
         )
+        # Compound qualifier strip. Handles "Annotated Edition", "Updated
+        # and Expanded", "Fully Revised & Updated Edition", "Revised,
+        # Updated, and Expanded Edition", etc. The leading adverb is only
+        # matched when it precedes a real qualifier word.
         title = re.sub(
-            r'\s*(?:' + _EDITION_QUALIFIERS + r')\s*$',
+            r'\s*(?:' + adverb_prefix + r')?'
+            + qualifier_chain
+            + r'(?:\s+[Ee]dition)?'
+            r'\s*$',
             '',
             title,
             flags=re.IGNORECASE,
@@ -2126,8 +2149,11 @@ def convert_with_marker(pdf_path, output_dir):
     print(f"Converting with Marker: {pdf_path.name}")
 
     with tempfile.TemporaryDirectory() as tmpdir:
+        # Newer marker-pdf releases (≥1.0) take the output path via the
+        # `--output_dir` flag rather than as a second positional argument.
+        # Passing it positionally raises "Got unexpected extra argument".
         result = subprocess.run(
-            ["marker_single", str(pdf_path), tmpdir],
+            ["marker_single", str(pdf_path), "--output_dir", tmpdir],
             capture_output=True,
             text=True,
         )

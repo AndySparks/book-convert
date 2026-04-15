@@ -1,0 +1,5 @@
+# Python 3.10+ only. Install into .venv-marker:
+#   python3.12 -m venv .venv-marker
+#   .venv-marker/bin/pip install -r requirements-marker.txt
+-r requirements.txt
+marker-pdf

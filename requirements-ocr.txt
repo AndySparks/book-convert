@@ -1,0 +1,3 @@
+-r requirements.txt
+pdf2image
+pytesseract

@@ -1,0 +1,4 @@
+# Python 3.10+ only. Install into .venv-marker:
+#   .venv-marker/bin/pip install -r requirements-docling.txt
+-r requirements.txt
+docling

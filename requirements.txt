@@ -1,8 +1,1 @@
 pymupdf
-
-# OCR dependencies (only needed for --method ocr)
-pdf2image
-pytesseract
-
-# Marker (only needed for --method marker, requires Python 3.10+)
-# marker-pdf

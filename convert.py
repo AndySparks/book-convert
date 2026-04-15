@@ -2473,6 +2473,9 @@ def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False):
         return False
 
 
+# Public alias used by tests and future callers who deal exclusively with PDFs.
+convert_pdf = convert_book
+
 _SUPPORTED_BOOK_EXTS = {".pdf", ".epub"}
 
 

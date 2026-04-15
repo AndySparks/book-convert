@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 """
-BookConvert - Convert PDF books to clean Markdown.
+BookConvert - Convert PDF and EPUB books to clean Markdown.
 
-Three conversion methods:
+PDF conversion methods:
   - pymupdf (default): Fast, reliable text extraction using PyMuPDF/fitz
   - marker: High-quality conversion using marker-pdf (requires Python 3.10+)
   - ocr: Tesseract OCR for scanned/image-based PDFs (slowest but handles images)
 
+EPUB conversion: routed through pandoc, which preserves the epub's chapter
+structure as markdown headings. The --method flag only applies to PDFs; epubs
+always use pandoc.
+
 Usage:
     python convert.py input/MyBook.pdf
+    python convert.py input/MyBook.epub                   # EPUB -> markdown via pandoc
     python convert.py input/MyBook.pdf --output output/
     python convert.py input/MyBook.pdf --method ocr      # Force OCR for scanned PDFs
     python convert.py input/MyBook.pdf --method marker    # Use marker-pdf
-    python convert.py input/                              # Convert all PDFs in a directory
+    python convert.py input/                              # Convert all PDFs/EPUBs in a directory
     python convert.py input/ --skip-existing              # Skip already-converted files
 """
 
@@ -128,6 +133,21 @@ def check_dependencies(method):
             for dep in missing:
                 lines.append(f"  - {dep}")
             raise DependencyError("\n".join(lines))
+
+    elif method == "pandoc":
+        # EPUB conversion shells out to pandoc. We check for the binary on
+        # PATH rather than importing a Python wrapper because pandoc is a
+        # standalone tool with no official Python bindings; pypandoc would
+        # just wrap the same subprocess call with an extra dependency.
+        try:
+            subprocess.run(
+                ["pandoc", "--version"], capture_output=True, timeout=10
+            )
+        except FileNotFoundError:
+            raise DependencyError(
+                "Missing dependency: pandoc (brew install pandoc)\n"
+                "  EPUB conversion uses pandoc to preserve chapter structure."
+            )
 
 
 _WORD_ORDINALS = (
@@ -2285,37 +2305,158 @@ def convert_with_ocr(pdf_path, output_dir):
     return True
 
 
-def convert_pdf(pdf_path, output_dir, method="pymupdf", auto_ocr=False):
-    """Convert a single PDF to markdown.
+def _strip_pandoc_frontmatter(body):
+    """Remove pandoc's YAML frontmatter block if present.
+
+    When pandoc produces gfm output from an epub with metadata (title,
+    author, rights), it emits a `---\\n<yaml>\\n---\\n` block at the top.
+    We strip it so the BookConvert header block (title, source, ---) can
+    sit at the top of the file in the same shape as the PDF output.
+    """
+    if not body.startswith("---\n"):
+        return body
+    end = body.find("\n---\n", 4)
+    if end == -1:
+        return body
+    return body[end + 5:].lstrip()
+
+
+# HTML comment pattern. Publishers often embed license notices
+# (`<!--Licensed to ...-->`) throughout the epub source; these leak
+# through even when raw_html is disabled because pandoc preserves HTML
+# comments as a separate extension.
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+
+# Images without alt text are usually decorative (publisher logos,
+# section-break glyphs). Pandoc emits them as `![](path)` references.
+# We don't extract media, so the paths dangle — drop the references.
+_EMPTY_IMAGE_RE = re.compile(r"^!\[\]\([^)]*\)\s*$", re.MULTILINE)
+
+# Collapse runs of 3+ blank lines (left behind by stripping comments
+# and images) down to a single blank line.
+_EXCESS_BLANK_LINES_RE = re.compile(r"\n{3,}")
+
+
+def _clean_pandoc_output(body):
+    """Strip publisher noise from pandoc's epub output.
+
+    Removes HTML comments (license notices), empty-alt image references
+    (decorative glyphs), and collapses the resulting blank-line runs.
+    """
+    body = _HTML_COMMENT_RE.sub("", body)
+    body = _EMPTY_IMAGE_RE.sub("", body)
+    body = _EXCESS_BLANK_LINES_RE.sub("\n\n", body)
+    return body.strip() + "\n"
+
+
+def convert_with_pandoc(book_path, output_dir):
+    """Convert an EPUB to markdown via pandoc.
+
+    Pandoc maps epub chapter structure to markdown headings, so the
+    output keeps the book's natural reading order without page markers.
+    Images are referenced but not extracted (BookConvert is a text-only
+    pipeline; pulling images would inflate output and break offline use).
+    Raises ConversionError on failure.
+    """
+    print(f"Converting with pandoc: {book_path.name}")
+
+    title = clean_title(book_path.stem)
+    output_file = output_dir / f"{book_path.stem}.md"
+
+    with tempfile.NamedTemporaryFile(
+        suffix=".md", delete=False
+    ) as tmp:
+        tmp_path = Path(tmp.name)
+
+    try:
+        # `gfm-raw_html` keeps gfm's nice heading/list/emphasis handling
+        # but drops raw HTML passthrough. Many epubs embed publisher
+        # `<span>`/`<div>`/`<img>` layout scaffolding that pandoc would
+        # otherwise preserve verbatim; disabling raw_html makes pandoc
+        # flatten those tags to their text content instead.
+        result = subprocess.run(
+            [
+                "pandoc",
+                "--from=epub",
+                "--to=gfm-raw_html",
+                "--wrap=none",
+                str(book_path),
+                "-o",
+                str(tmp_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise ConversionError(
+                f"pandoc error: {result.stderr.strip() or 'unknown failure'}"
+            )
+
+        body = tmp_path.read_text(encoding="utf-8")
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    body = _strip_pandoc_frontmatter(body)
+    body = _clean_pandoc_output(body)
+
+    if not body.strip():
+        raise ConversionError("pandoc produced empty output")
+
+    with open(output_file, "w", encoding="utf-8", errors="replace") as f:
+        f.write(f"# {title}\n\n")
+        f.write("*Converted from EPUB*\n\n")
+        f.write(f"*Source: {book_path.name}*\n\n")
+        f.write("---\n\n")
+        f.write(body)
+        if not body.endswith("\n"):
+            f.write("\n")
+
+    print(f"  -> {output_file}")
+    return True
+
+
+def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False):
+    """Convert a single book (PDF or EPUB) to markdown.
 
     Returns True on success, False on failure. Never raises.
-    If auto_ocr is True and pymupdf/marker fails due to scanned content,
+    EPUB files route through pandoc regardless of `method`. For PDFs,
+    if auto_ocr is True and pymupdf/marker fails due to scanned content,
     automatically retries with OCR.
     """
-    pdf_path = Path(pdf_path)
+    book_path = Path(book_path)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    suffix = book_path.suffix.lower()
+    is_pdf = suffix == ".pdf"
+
     try:
+        if suffix == ".epub":
+            return convert_with_pandoc(book_path, output_dir)
         if method == "ocr":
-            return convert_with_ocr(pdf_path, output_dir)
+            return convert_with_ocr(book_path, output_dir)
         elif method == "marker":
-            return convert_with_marker(pdf_path, output_dir)
+            return convert_with_marker(book_path, output_dir)
         else:
-            return convert_with_pymupdf(pdf_path, output_dir)
+            return convert_with_pymupdf(book_path, output_dir)
     except ConversionError as e:
         error_msg = str(e).lower()
         auto_ocr_triggers = ("scanned", "low quality")
-        if auto_ocr and method != "ocr" and any(t in error_msg for t in auto_ocr_triggers):
+        if (
+            auto_ocr
+            and is_pdf
+            and method != "ocr"
+            and any(t in error_msg for t in auto_ocr_triggers)
+        ):
             print(f"  Text extraction failed, auto-retrying with OCR...")
             try:
                 check_dependencies("ocr")
-                return convert_with_ocr(pdf_path, output_dir)
+                return convert_with_ocr(book_path, output_dir)
             except DependencyError as dep_e:
                 print(f"  OCR fallback unavailable: {dep_e}")
                 return False
             except Exception as ocr_e:
-                partial = output_dir / f"{pdf_path.stem}.md"
+                partial = output_dir / f"{book_path.stem}.md"
                 if partial.exists():
                     partial.unlink()
                 print(f"  OCR fallback also failed: {ocr_e}")
@@ -2324,8 +2465,7 @@ def convert_pdf(pdf_path, output_dir, method="pymupdf", auto_ocr=False):
         print(f"  FAILED: {e}")
         return False
     except Exception as e:
-        # Clean up partial output on unexpected errors
-        partial = output_dir / f"{pdf_path.stem}.md"
+        partial = output_dir / f"{book_path.stem}.md"
         if partial.exists():
             partial.unlink()
         print(f"  FAILED (unexpected): {e}")
@@ -2333,27 +2473,33 @@ def convert_pdf(pdf_path, output_dir, method="pymupdf", auto_ocr=False):
         return False
 
 
-def collect_pdfs(input_path):
-    """Collect PDF files from a path (file or directory).
+_SUPPORTED_BOOK_EXTS = {".pdf", ".epub"}
 
-    Handles both .pdf and .PDF extensions in directory mode.
+
+def collect_books(input_path):
+    """Collect PDF and EPUB files from a path (file or directory).
+
+    Extension matching is case-insensitive so .PDF and .EPUB both work.
     """
     input_path = Path(input_path)
 
-    if input_path.is_file() and input_path.suffix.lower() == ".pdf":
+    if (
+        input_path.is_file()
+        and input_path.suffix.lower() in _SUPPORTED_BOOK_EXTS
+    ):
         return [input_path]
     elif input_path.is_dir():
-        pdfs = sorted(
+        books = sorted(
             p for p in input_path.iterdir()
-            if p.is_file() and p.suffix.lower() == ".pdf"
+            if p.is_file() and p.suffix.lower() in _SUPPORTED_BOOK_EXTS
         )
-        if not pdfs:
-            print(f"No PDF files found in {input_path}")
+        if not books:
+            print(f"No PDF or EPUB files found in {input_path}")
             sys.exit(1)
-        print(f"Found {len(pdfs)} PDF(s) to convert.\n")
-        return pdfs
+        print(f"Found {len(books)} book(s) to convert.\n")
+        return books
     else:
-        print(f"Not a PDF file or directory: {input_path}")
+        print(f"Not a PDF/EPUB file or directory: {input_path}")
         sys.exit(1)
 
 
@@ -2383,7 +2529,7 @@ def main():
     )
     parser.add_argument(
         "input",
-        help="PDF file, markdown file, or directory to convert/clean",
+        help="PDF file, EPUB file, markdown file, or directory to convert/clean",
     )
     parser.add_argument(
         "--output",
@@ -2437,14 +2583,14 @@ def main():
     parser.add_argument(
         "--archive",
         action="store_true",
-        help="After a successful conversion, move the source PDF from "
+        help="After a successful conversion, move the source book from "
              "input/ into archive/ (created if missing). Failed conversions "
              "and --skip-existing skips are left in place.",
     )
     parser.add_argument(
         "--archive-dir",
         default="archive",
-        help="Directory to move successfully-converted PDFs into when "
+        help="Directory to move successfully-converted books into when "
              "--archive is set (default: archive/)",
     )
     parser.add_argument(
@@ -2489,32 +2635,46 @@ def main():
     else:
         method = args.method
 
+    output_dir = Path(args.output)
+    books = collect_books(args.input)
+
+    # Dependency check runs AFTER collection so we only validate the
+    # toolchains we actually need: the PDF method only if a PDF is
+    # present, pandoc only if an EPUB is present.
     if not args.skip_check:
+        needs_pdf_method = any(
+            b.suffix.lower() == ".pdf" for b in books
+        )
+        needs_pandoc = any(
+            b.suffix.lower() == ".epub" for b in books
+        )
         try:
-            check_dependencies(method)
+            if needs_pdf_method:
+                check_dependencies(method)
+            if needs_pandoc:
+                check_dependencies("pandoc")
         except DependencyError as e:
             print(e)
             sys.exit(1)
 
-    output_dir = Path(args.output)
-    pdfs = collect_pdfs(args.input)
-
     success = 0
     failed = 0
     skipped = 0
-    converted_pdfs = []  # successfully converted source paths, for --archive
+    converted_books = []  # successfully converted source paths, for --archive
 
-    for pdf in pdfs:
+    for book in books:
         if args.skip_existing:
-            existing = output_dir / f"{pdf.stem}.md"
+            existing = output_dir / f"{book.stem}.md"
             if existing.exists():
-                print(f"Skipping (already exists): {pdf.name}")
+                print(f"Skipping (already exists): {book.name}")
                 skipped += 1
                 continue
 
-        if convert_pdf(pdf, output_dir, method=method, auto_ocr=args.auto_ocr):
+        if convert_book(
+            book, output_dir, method=method, auto_ocr=args.auto_ocr
+        ):
             success += 1
-            converted_pdfs.append(pdf)
+            converted_books.append(book)
         else:
             failed += 1
         print()
@@ -2524,20 +2684,18 @@ def main():
         parts.append(f"{skipped} skipped")
     print(f"Done. {', '.join(parts)}.")
 
-    # --archive: move successfully-converted PDFs into the archive dir.
-    # Only runs on success; failed conversions stay in input/ so the user
-    # can retry. Skip collisions by appending a timestamp suffix so we
-    # never overwrite an existing archived file.
-    if args.archive and converted_pdfs:
+    # --archive: move successfully-converted source books into the archive
+    # dir. Only runs on success; failed conversions stay in input/ so the
+    # user can retry. Skip collisions by appending a timestamp suffix so
+    # we never overwrite an existing archived file.
+    if args.archive and converted_books:
         archive_dir = Path(args.archive_dir)
         archive_dir.mkdir(parents=True, exist_ok=True)
         moved = 0
         collisions = 0
-        for src in converted_pdfs:
+        for src in converted_books:
             dest = archive_dir / src.name
             if dest.exists():
-                # Preserve the existing archived copy by suffixing the
-                # new one with a timestamp.
                 from datetime import datetime
                 ts = datetime.now().strftime("%Y%m%d-%H%M%S")
                 dest = archive_dir / f"{src.stem}.{ts}{src.suffix}"
@@ -2547,7 +2705,7 @@ def main():
                 moved += 1
             except Exception as e:
                 print(f"  Archive failed for {src.name}: {e}")
-        msg = f"Archived {moved} PDF(s) to {archive_dir}/"
+        msg = f"Archived {moved} book(s) to {archive_dir}/"
         if collisions:
             msg += f" ({collisions} renamed to avoid collision)"
         print(msg)

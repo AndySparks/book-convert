@@ -1,11 +1,12 @@
 # BookConvert
 
-Convert PDF books to clean Markdown files for use in [Claude Projects](https://claude.ai), NotebookLM, and other LLM tools.
+Convert PDF and EPUB books to clean Markdown files for use in [Claude Projects](https://claude.ai), NotebookLM, and other LLM tools.
 
-Three conversion methods:
-- **PyMuPDF** (default): Fast, reliable text extraction that works on any Python 3.7+
-- **Marker**: High-quality markdown conversion (requires Python 3.10+)
-- **OCR**: Tesseract OCR for scanned/image-based PDFs
+Conversion paths:
+- **PyMuPDF** (PDF default): Fast, reliable text extraction that works on any Python 3.7+
+- **Marker** (PDF): High-quality markdown conversion (requires Python 3.10+)
+- **OCR** (PDF): Tesseract OCR for scanned/image-based PDFs
+- **Pandoc** (EPUB): Preserves the epub's chapter structure as markdown headings
 
 ## Setup
 
@@ -19,9 +20,12 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-This installs PyMuPDF (the default method). For OCR or Marker, install extras:
+This installs PyMuPDF (the default PDF method). For other paths, install extras:
 
 ```bash
+# EPUB support
+brew install pandoc
+
 # OCR support (for scanned PDFs)
 brew install tesseract poppler
 pip install pdf2image pytesseract
@@ -32,17 +36,20 @@ pip install marker-pdf
 
 ## Usage
 
-### Convert a single PDF
+### Convert a single PDF or EPUB
 
 ```bash
 python convert.py input/MyBook.pdf
+python convert.py input/MyBook.epub    # EPUB -> markdown via pandoc
 ```
 
-### Convert all PDFs in a directory
+### Convert all PDFs and EPUBs in a directory
 
 ```bash
 python convert.py input/
 ```
+
+Directory mode picks up both `.pdf` and `.epub` files. The tool dispatches each one to the right toolchain automatically.
 
 ### Choose a conversion method
 
@@ -56,11 +63,11 @@ python convert.py input/ScannedBook.pdf --ocr         # Shortcut for --method oc
 ### Archive source PDFs after conversion
 
 ```bash
-python convert.py input/ --archive                    # Move converted PDFs into archive/
+python convert.py input/ --archive                    # Move converted books into archive/
 python convert.py input/ --archive --archive-dir old/ # Custom archive location
 ```
 
-Failed conversions and `--skip-existing` skips are left in `input/`. Name collisions in the archive are preserved by appending a timestamp to the new copy.
+Failed conversions and `--skip-existing` skips are left in `input/`. Name collisions in the archive are preserved by appending a timestamp to the new copy. Both PDFs and EPUBs archive through the same flag.
 
 ### Skip already-converted files
 
@@ -76,11 +83,15 @@ python convert.py input/MyBook.pdf --output output/Philosophy/
 
 ## How it works
 
-1. Drop your PDF(s) into the `input/` folder
-2. Run `convert.py` -- it uses **PyMuPDF** by default for fast, reliable text extraction
-3. For higher-quality markdown formatting, use `--method marker` or `--papers` (requires Python 3.10+)
+1. Drop your PDF(s) or EPUB(s) into the `input/` folder
+2. Run `convert.py` -- PDFs go through **PyMuPDF** by default, EPUBs go through **pandoc**
+3. For higher-quality PDF formatting, use `--method marker` or `--papers` (requires Python 3.10+)
 4. For scanned books (where the pages are images), use `--method ocr` or `--ocr`
 5. Converted markdown appears in `output/`
+
+### EPUB conversion
+
+EPUBs go through pandoc with raw HTML disabled, which gives you clean chapter headings, preserved emphasis, and usable footnote anchors without the publisher layout scaffolding leaking into the output. The `--method` flag is PDF-only; EPUBs always use pandoc. Install with `brew install pandoc`.
 
 ### Academic papers
 

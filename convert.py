@@ -35,6 +35,7 @@ from pathlib import Path
 log = logging.getLogger("bookconvert")
 
 from report import ConversionReport, write_report
+import assets
 
 
 class DependencyError(Exception):
@@ -1791,7 +1792,7 @@ def _extract_page_text_with_regions(page, regions):
     return "\n\n".join(s for s in segments if s) + "\n"
 
 
-def _extract_page_text(page):
+def _extract_page_text(page, extra_regions=None):
     """Extract text from a page, respecting two-column layouts.
 
     For single-column pages, returns the default top-to-bottom extraction.
@@ -1806,6 +1807,10 @@ def _extract_page_text(page):
         words, restoring the proper reading order.
     Blocks are then sorted by (y_top, x_left) so headers, bylines, abstract,
     body, and footnotes appear in the correct order.
+
+    extra_regions: optional list of (y0, y1, markdown_str) tuples for image
+    regions extracted by assets.extract_page_assets. Spliced into the page
+    text alongside any table regions on single-column pages.
     """
     split = _detect_two_column_split(page)
     if split is None:
@@ -1815,8 +1820,11 @@ def _extract_page_text(page):
         # so the flattened column-by-column dump is replaced with a real
         # grid.
         table_regions = _find_table_regions(page)
-        if table_regions:
-            return _extract_page_text_with_regions(page, table_regions)
+        all_regions = list(table_regions)
+        if extra_regions:
+            all_regions.extend(extra_regions)
+        if all_regions:
+            return _extract_page_text_with_regions(page, all_regions)
         return page.get_text()
 
     try:
@@ -2063,10 +2071,12 @@ def _is_broken_toc_page(text):
     return matches / len(non_empty) >= 0.5
 
 
-def convert_with_pymupdf(pdf_path, output_dir):
+def convert_with_pymupdf(pdf_path, output_dir, extract_images=False):
     """Convert a PDF using PyMuPDF (fitz) for text extraction.
 
     Raises ConversionError if the PDF appears to be scanned (too little text).
+    When extract_images is True, figures and diagrams are rendered as PNGs
+    into a <stem>_assets/ subdirectory alongside the markdown.
     """
     import fitz
 
@@ -2083,6 +2093,9 @@ def convert_with_pymupdf(pdf_path, output_dir):
         output=str(output_file),
         method="pymupdf",
     )
+
+    asset_dir = output_dir / f"{pdf_path.stem}_assets"
+    total_assets = 0
 
     # Extract embedded TOC (bookmark tree) before closing the doc.
     # This sidesteps pdf-text-extraction mangling of dotted-leader TOCs.
@@ -2115,7 +2128,17 @@ def convert_with_pymupdf(pdf_path, output_dir):
         # toward --papers / marker-pdf for likely academic papers.
         if _detect_two_column_split(page) is not None:
             two_col_pages += 1
-        text = _extract_page_text(page)
+        page_asset_regions = []
+        if extract_images:
+            extracted = assets.extract_page_assets(
+                page, pdf_path.stem, asset_dir, i + 1
+            )
+            total_assets += len(extracted)
+            # Convert to (start_y, end_y, markdown) tuples for the
+            # region splicer. Each asset gets its own region.
+            for rect, md in extracted:
+                page_asset_regions.append((rect.y0, rect.y1, md))
+        text = _extract_page_text(page, extra_regions=page_asset_regions)
         # Strip any unpaired surrogate code points that PyMuPDF sometimes
         # surfaces from PDFs with overlong UTF-8 or non-standard font encodings
         text = _strip_surrogates(text)
@@ -2244,6 +2267,7 @@ def convert_with_pymupdf(pdf_path, output_dir):
     report.two_column_pages = two_col_pages
     report.quality_score = quality
     report.skipped_toc_pages = skipped_toc_pages
+    report.extracted_assets = total_assets
 
     report_path = output_file.with_suffix(".report.json")
     write_report(report_path, report)
@@ -2570,13 +2594,14 @@ def convert_with_docling(pdf_path, output_dir):
     raise ConversionError("docling backend not yet implemented")
 
 
-def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False):
+def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False, extract_images=False):
     """Convert a single book (PDF or EPUB) to markdown.
 
     Returns True on success, False on failure. Never raises.
     EPUB files route through pandoc regardless of `method`. For PDFs,
     if auto_ocr is True and pymupdf/marker fails due to scanned content,
     automatically retries with OCR.
+    When extract_images is True, figures are rendered as PNGs (pymupdf only).
     """
     book_path = Path(book_path)
     output_dir = Path(output_dir)
@@ -2597,7 +2622,7 @@ def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False):
         elif method == "docling":
             result = convert_with_docling(book_path, output_dir)
         else:
-            result = convert_with_pymupdf(book_path, output_dir)
+            result = convert_with_pymupdf(book_path, output_dir, extract_images=extract_images)
         # Backends return either True (legacy) or a ConversionReport.
         # Treat any non-False truthy value as success.
         return bool(result)
@@ -2759,6 +2784,12 @@ def main():
              "--archive is set (default: archive/)",
     )
     parser.add_argument(
+        "--extract-images",
+        action="store_true",
+        help="Extract figures, diagrams, and raster images as PNGs alongside "
+             "the markdown (pymupdf backend only).",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose/debug logging output",
@@ -2836,7 +2867,11 @@ def main():
                 continue
 
         if convert_book(
-            book, output_dir, method=method, auto_ocr=args.auto_ocr
+            book,
+            output_dir,
+            method=method,
+            auto_ocr=args.auto_ocr,
+            extract_images=args.extract_images,
         ):
             success += 1
             converted_books.append(book)

@@ -1,0 +1,44 @@
+"""Conversion report sidecar — pure data, no PDF logic.
+
+Every backend populates one ConversionReport and writes it as
+<stem>.report.json next to the markdown output. This gives us a
+machine-readable record of what happened for each conversion:
+method, page counts, OCR usage, extracted assets, quality score,
+and any warnings.
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+from typing import List
+
+
+@dataclass
+class ConversionReport:
+    """Machine-readable record of a single conversion."""
+
+    source: str
+    output: str
+    method: str
+    total_pages: int = 0
+    pages_with_text: int = 0
+    ocr_pages: int = 0
+    two_column_pages: int = 0
+    extracted_assets: int = 0
+    quality_score: float = 1.0
+    skipped_toc_pages: int = 0
+    warnings: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def write_report(path: Path, report: ConversionReport) -> None:
+    """Write a ConversionReport to a JSON sidecar at `path`."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(report.to_dict(), indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )

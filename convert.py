@@ -2495,7 +2495,61 @@ def convert_with_pandoc(book_path, output_dir):
 
 
 def convert_with_pymupdf4llm(pdf_path, output_dir):
-    raise ConversionError("pymupdf4llm backend not yet implemented")
+    """Convert a PDF using pymupdf4llm's Markdown exporter.
+
+    pymupdf4llm is PyMuPDF's own LLM-oriented markdown exporter. It
+    handles multi-column reading order, image extraction, tables, and
+    auto-OCR for scanned pages. This backend is a light wrapper: we
+    call `to_markdown()` and stitch the output into BookConvert's
+    standard header format.
+    """
+    import pymupdf4llm
+    import fitz
+
+    print(f"Converting with pymupdf4llm: {pdf_path.name}")
+
+    with fitz.open(str(pdf_path)) as doc:
+        total_pages = len(doc)
+    print(f"  {total_pages} pages")
+
+    title = clean_title(pdf_path.stem)
+    output_file = output_dir / f"{pdf_path.stem}.md"
+
+    # pymupdf4llm returns the full markdown as a string. It also writes
+    # images into an accompanying directory if we pass write_images=True;
+    # we use the same naming convention as the marker backend so the
+    # output directory structure is consistent.
+    image_dir = output_dir / f"{pdf_path.stem}_images"
+    markdown = pymupdf4llm.to_markdown(
+        str(pdf_path),
+        write_images=True,
+        image_path=str(image_dir),
+        image_format="png",
+    )
+
+    header = (
+        f"# {title}\n\n"
+        f"*Converted from PDF using pymupdf4llm*\n\n"
+        f"*Source: {pdf_path.name}*\n\n"
+        f"---\n\n"
+    )
+    output_file.write_text(header + markdown, encoding="utf-8", errors="replace")
+    print(f"  -> {output_file}")
+
+    extracted_assets = 0
+    if image_dir.exists():
+        extracted_assets = sum(1 for _ in image_dir.glob("*"))
+
+    report = ConversionReport(
+        source=str(pdf_path),
+        output=str(output_file),
+        method="pymupdf4llm",
+        total_pages=total_pages,
+        pages_with_text=total_pages,  # pymupdf4llm handles its own detection
+        extracted_assets=extracted_assets,
+    )
+    write_report(output_file.with_suffix(".report.json"), report)
+    return report
 
 
 def convert_with_docling(pdf_path, output_dir):

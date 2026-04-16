@@ -10,20 +10,27 @@ The marginal cost of completeness is near zero with AI. Do the whole thing. Do i
 
 ## Workflow
 
-1. User places PDF(s) in the `input/` directory
-2. Run `python convert.py input/` to convert all PDFs, or `python convert.py input/MyBook.pdf` for a single file
-3. Default method is `pymupdf` (fast, works on Python 3.7+)
-4. Use `--method marker` for richer markdown (requires Python 3.10+)
-5. Use `--method ocr` or `--ocr` for scanned/image-based PDFs
-6. Converted markdown files appear in `output/`
+1. User places PDF(s) or EPUB(s) in the `input/` directory
+2. Run `python convert.py input/` to convert all files, or `python convert.py input/MyBook.pdf` for a single file
+3. Default method is `pymupdf` (fast text extraction, works on Python 3.7+)
+4. `--method pymupdf4llm` (Python 3.10+, use `.venv-marker`) — text + image extraction in one pass
+5. `--method marker` (Python 3.10+, use `.venv-marker`) — highest quality, slowest
+6. `--method docling` (Python 3.10+, use `.venv-marker`) — IBM's layout-aware pipeline
+7. `--method ocr` or `--ocr` — tesseract OCR for scanned/image-based PDFs
+8. EPUB files always route through pandoc regardless of `--method`
+9. Add `--extract-images` (pymupdf backend only) to render figures, diagrams, and raster images as PNGs in a sibling `<stem>_assets/` dir with inline markdown references
+10. Every conversion writes a `<stem>.report.json` sidecar: method, page counts, OCR pages, extracted assets, quality score, warnings
+11. Converted markdown files appear in `output/`
 
 ## When helping users
 
-- If a conversion produces poor results (garbled text, missing content), suggest trying `--method ocr`
+- If a conversion produces poor results (garbled text, missing content), first try `--method pymupdf4llm` (Python 3.10+), then `--method ocr`; `--auto-ocr` auto-retries with tesseract/marker on quality failure
+- For visually heavy books (diagrams, figures), use `--extract-images` or `--method pymupdf4llm` — both produce PNGs for figures
 - If OCR output needs cleanup, help the user clean up the markdown: fix obvious OCR errors, add proper headings, remove page artifacts
 - Keep the markdown header format: title, "Converted from PDF" note, source filename, then `---` separator
 - Use `<!-- Page N -->` comments to mark page boundaries
 - The `clean_title()` function strips version markers (e.g., "V3") from filenames for cleaner titles
+- Inspect the `.report.json` sidecar to see what happened: `jq '.method,.extracted_assets,.quality_score' output/*.report.json`
 
 ## Post-Conversion Quality Check (REQUIRED)
 
@@ -44,7 +51,12 @@ After every conversion run, automatically spot-check each converted file:
 
 ## Dependencies
 
-- `pymupdf` - default converter, fast text extraction via PyMuPDF/fitz
-- `marker-pdf` - high-quality markdown conversion (Python 3.10+ only)
-- `pdf2image` + `pytesseract` - OCR fallback for scanned PDFs
+Install layout: default `.venv` (Python 3.7+) for text extraction; `.venv-marker` (Python 3.10+) for the ML-backed extras.
+
+- `pymupdf` — default converter, fast text extraction via PyMuPDF/fitz (`requirements.txt`)
+- `pymupdf4llm` — PyMuPDF's LLM-oriented markdown exporter with image extraction, Python 3.10+ (`requirements-pymupdf4llm.txt`)
+- `marker-pdf` — highest quality markdown conversion, Python 3.10+ (`requirements-marker.txt`)
+- `docling` — IBM's layout-aware pipeline (tables, formulas, images), Python 3.10+ (`requirements-docling.txt`)
+- `pdf2image` + `pytesseract` — OCR fallback for scanned PDFs (`requirements-ocr.txt`)
 - System: `tesseract`, `poppler` (brew install on macOS, needed for OCR mode)
+- System: `pandoc` (brew install on macOS, needed for EPUB conversion)

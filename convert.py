@@ -2662,7 +2662,46 @@ def convert_with_pymupdf4llm(pdf_path, output_dir):
 
 
 def convert_with_docling(pdf_path, output_dir):
-    raise ConversionError("docling backend not yet implemented")
+    """Convert a PDF using IBM's Docling pipeline.
+
+    Docling does layout analysis, reading order, tables, formulas, image
+    classification, and markdown export. This backend is a light wrapper
+    around `DocumentConverter.convert(source).document.export_to_markdown()`.
+    """
+    from docling.document_converter import DocumentConverter
+    import fitz
+
+    print(f"Converting with docling: {pdf_path.name}")
+
+    with fitz.open(str(pdf_path)) as doc:
+        total_pages = len(doc)
+    print(f"  {total_pages} pages")
+
+    title = clean_title(pdf_path.stem)
+    output_file = output_dir / f"{pdf_path.stem}.md"
+
+    converter = DocumentConverter()
+    result = converter.convert(str(pdf_path))
+    markdown = result.document.export_to_markdown()
+
+    header = (
+        f"# {title}\n\n"
+        f"*Converted from PDF using docling*\n\n"
+        f"*Source: {pdf_path.name}*\n\n"
+        f"---\n\n"
+    )
+    output_file.write_text(header + markdown, encoding="utf-8", errors="replace")
+    print(f"  -> {output_file}")
+
+    report = ConversionReport(
+        source=str(pdf_path),
+        output=str(output_file),
+        method="docling",
+        total_pages=total_pages,
+        pages_with_text=total_pages,
+    )
+    write_report(output_file.with_suffix(".report.json"), report)
+    return report
 
 
 def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False, extract_images=False):

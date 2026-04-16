@@ -2273,7 +2273,21 @@ def convert_with_marker(pdf_path, output_dir):
             log.warning("Marker produced %d .md files; only the first was used", len(md_files))
 
         print(f"  -> {target}")
-        return True
+        report = ConversionReport(
+            source=str(pdf_path),
+            output=str(target),
+            method="marker",
+        )
+        # Count pages in the source PDF for the report.
+        import fitz
+        try:
+            with fitz.open(str(pdf_path)) as src:
+                report.total_pages = len(src)
+        except Exception as e:
+            report.warnings.append(f"could not read page count: {e}")
+        report_path = target.with_suffix(".report.json")
+        write_report(report_path, report)
+        return report
 
 
 def convert_with_ocr(pdf_path, output_dir):
@@ -2290,10 +2304,18 @@ def convert_with_ocr(pdf_path, output_dir):
     title = clean_title(pdf_path.stem)
     output_file = output_dir / f"{pdf_path.stem}.md"
 
+    report = ConversionReport(
+        source=str(pdf_path),
+        output=str(output_file),
+        method="ocr",
+    )
+
     # Get page count first, then process one page at a time
     info = pdfinfo_from_path(str(pdf_path))
     total_pages = info["Pages"]
     print(f"  {total_pages} pages")
+
+    pages_with_text = 0
 
     with open(output_file, "w", encoding="utf-8", errors="replace") as f:
         f.write(f"# {title}\n\n")
@@ -2309,6 +2331,7 @@ def convert_with_ocr(pdf_path, output_dir):
             if images:
                 text = pytesseract.image_to_string(images[0])
                 if text.strip():
+                    pages_with_text += 1
                     f.write(f"<!-- Page {i} -->\n\n")
                     cleaned = clean_text(text.strip())
                     cleaned = _format_headings(cleaned)
@@ -2319,7 +2342,12 @@ def convert_with_ocr(pdf_path, output_dir):
                 print(f"  Processed {i}/{total_pages} pages...")
 
     print(f"  -> {output_file}")
-    return True
+    report.total_pages = total_pages
+    report.pages_with_text = pages_with_text
+    report.ocr_pages = total_pages
+    report_path = output_file.with_suffix(".report.json")
+    write_report(report_path, report)
+    return report
 
 
 def _strip_pandoc_frontmatter(body):

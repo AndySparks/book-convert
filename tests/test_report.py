@@ -92,3 +92,28 @@ def test_convert_with_pymupdf_writes_sidecar(tmp_path):
     data = json.loads(sidecar.read_text(encoding="utf-8"))
     assert data["method"] == "pymupdf"
     assert data["total_pages"] == 3
+
+
+def test_convert_with_ocr_writes_sidecar(tmp_path):
+    """OCR backend should populate ocr_pages and write a sidecar."""
+    import convert
+    from tests import fixtures
+
+    # Skip if tesseract is not installed
+    try:
+        convert.check_dependencies("ocr")
+    except convert.DependencyError:
+        pytest.skip("OCR dependencies not installed")
+
+    pdf = fixtures.build_scanned_pdf(tmp_path)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    result = convert.convert_with_ocr(pdf, out_dir)
+    assert isinstance(result, ConversionReport)
+    assert result.method == "ocr"
+    assert result.ocr_pages == result.total_pages
+    assert result.total_pages >= 1
+
+    sidecar = out_dir / f"{pdf.stem}.report.json"
+    assert sidecar.exists()

@@ -34,6 +34,8 @@ from pathlib import Path
 
 log = logging.getLogger("bookconvert")
 
+from report import ConversionReport, write_report
+
 
 class DependencyError(Exception):
     """Raised when a required dependency is missing."""
@@ -2028,6 +2030,12 @@ def convert_with_pymupdf(pdf_path, output_dir):
     title = clean_title(pdf_path.stem)
     output_file = output_dir / f"{pdf_path.stem}.md"
 
+    report = ConversionReport(
+        source=str(pdf_path),
+        output=str(output_file),
+        method="pymupdf",
+    )
+
     # Extract embedded TOC (bookmark tree) before closing the doc.
     # This sidesteps pdf-text-extraction mangling of dotted-leader TOCs.
     try:
@@ -2182,7 +2190,16 @@ def convert_with_pymupdf(pdf_path, output_dir):
                 "marker-pdf but requires Python 3.10+ (current: "
                 f"{sys.version_info.major}.{sys.version_info.minor})."
             )
-    return True
+
+    report.total_pages = total_pages
+    report.pages_with_text = pages_with_text
+    report.two_column_pages = two_col_pages
+    report.quality_score = quality
+    report.skipped_toc_pages = skipped_toc_pages
+
+    report_path = output_file.with_suffix(".report.json")
+    write_report(report_path, report)
+    return report
 
 
 def convert_with_marker(pdf_path, output_dir):
@@ -2415,6 +2432,14 @@ def convert_with_pandoc(book_path, output_dir):
     return True
 
 
+def convert_with_pymupdf4llm(pdf_path, output_dir):
+    raise ConversionError("pymupdf4llm backend not yet implemented")
+
+
+def convert_with_docling(pdf_path, output_dir):
+    raise ConversionError("docling backend not yet implemented")
+
+
 def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False):
     """Convert a single book (PDF or EPUB) to markdown.
 
@@ -2432,13 +2457,20 @@ def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False):
 
     try:
         if suffix == ".epub":
-            return convert_with_pandoc(book_path, output_dir)
+            return bool(convert_with_pandoc(book_path, output_dir))
         if method == "ocr":
-            return convert_with_ocr(book_path, output_dir)
+            result = convert_with_ocr(book_path, output_dir)
         elif method == "marker":
-            return convert_with_marker(book_path, output_dir)
+            result = convert_with_marker(book_path, output_dir)
+        elif method == "pymupdf4llm":
+            result = convert_with_pymupdf4llm(book_path, output_dir)
+        elif method == "docling":
+            result = convert_with_docling(book_path, output_dir)
         else:
-            return convert_with_pymupdf(book_path, output_dir)
+            result = convert_with_pymupdf(book_path, output_dir)
+        # Backends return either True (legacy) or a ConversionReport.
+        # Treat any non-False truthy value as success.
+        return bool(result)
     except ConversionError as e:
         error_msg = str(e).lower()
         auto_ocr_triggers = ("scanned", "low quality")

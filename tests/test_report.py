@@ -68,3 +68,27 @@ def test_write_report_pretty_prints(tmp_path):
     text = p.read_text(encoding="utf-8")
     assert "\n" in text
     assert text.startswith("{")
+
+
+def test_convert_with_pymupdf_writes_sidecar(tmp_path):
+    """convert_with_pymupdf should write a .report.json next to the .md output."""
+    from tests import fixtures
+    import convert
+
+    pdf = fixtures.build_text_pdf(tmp_path, pages=3)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    result = convert.convert_with_pymupdf(pdf, out_dir)
+
+    # New return type: ConversionReport, not bool
+    assert isinstance(result, ConversionReport)
+    assert result.method == "pymupdf"
+    assert result.total_pages == 3
+    assert result.pages_with_text == 3
+
+    sidecar = out_dir / f"{pdf.stem}.report.json"
+    assert sidecar.exists()
+    data = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert data["method"] == "pymupdf"
+    assert data["total_pages"] == 3

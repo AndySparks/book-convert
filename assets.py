@@ -54,3 +54,67 @@ def find_raster_regions(page: fitz.Page) -> List[fitz.Rect]:
             continue
         regions.append(rect)
     return regions
+
+
+# Minimum vector-drawing cluster area. Single stroke-width lines (rules
+# above/below headings, underlines, footnote separators) are tiny and
+# never qualify.
+MIN_VECTOR_AREA = 2500
+# Two boxes cluster together if they overlap OR are within this many PDF
+# points of each other.
+VECTOR_CLUSTER_GAP = 30
+
+
+def find_vector_regions(page: fitz.Page) -> List[fitz.Rect]:
+    """Return bounding boxes for clustered vector drawings on this page.
+
+    PyMuPDF's get_drawings returns one entry per drawing primitive
+    (stroke, fill, rect). A figure is a cluster of primitives with
+    overlapping or nearby bounding boxes. We merge until no more merges
+    are possible, then drop clusters below MIN_VECTOR_AREA.
+    """
+    try:
+        drawings = page.get_drawings()
+    except Exception:
+        return []
+    boxes: List[fitz.Rect] = []
+    for d in drawings:
+        rect = d.get("rect")
+        if rect is None or rect.is_empty:
+            continue
+        boxes.append(fitz.Rect(rect))
+
+    # Merge until stable.
+    merged = _merge_rects(boxes, gap=VECTOR_CLUSTER_GAP)
+
+    # Filter by area (use width * height — fitz.Rect.get_area not available).
+    return [r for r in merged if r.width * r.height >= MIN_VECTOR_AREA]
+
+
+def _merge_rects(rects: List[fitz.Rect], gap: float) -> List[fitz.Rect]:
+    """Iteratively merge rects that overlap or touch within `gap` points."""
+    out = [fitz.Rect(r) for r in rects]
+    changed = True
+    while changed:
+        changed = False
+        i = 0
+        while i < len(out):
+            j = i + 1
+            while j < len(out):
+                if _rects_close(out[i], out[j], gap):
+                    out[i] = out[i] | out[j]  # union
+                    del out[j]
+                    changed = True
+                else:
+                    j += 1
+            i += 1
+    return out
+
+
+def _rects_close(a: fitz.Rect, b: fitz.Rect, gap: float) -> bool:
+    """True if two rects overlap or are within `gap` PDF points."""
+    if a.intersects(b):
+        return True
+    # Expand `a` by `gap` on all sides and test intersection.
+    expanded = fitz.Rect(a.x0 - gap, a.y0 - gap, a.x1 + gap, a.y1 + gap)
+    return expanded.intersects(b)

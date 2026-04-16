@@ -2628,7 +2628,14 @@ def convert_with_pymupdf4llm(pdf_path, output_dir):
     # images into an accompanying directory if we pass write_images=True;
     # we use the same naming convention as the marker backend so the
     # output directory structure is consistent.
-    image_dir = output_dir / f"{pdf_path.stem}_images"
+    # pymupdf4llm sanitizes spaces in image_path to underscores when it
+    # writes the PNGs, so we must sanitize the directory name ourselves
+    # before mkdir — otherwise we'd create "Stem With Spaces_images/" and
+    # pymupdf4llm would try to write into "Stem_With_Spaces_images/" and
+    # error out.
+    safe_stem = re.sub(r"\s+", "_", pdf_path.stem)
+    image_dir = output_dir / f"{safe_stem}_images"
+    image_dir.mkdir(parents=True, exist_ok=True)
     markdown = pymupdf4llm.to_markdown(
         str(pdf_path),
         write_images=True,

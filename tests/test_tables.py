@@ -212,3 +212,28 @@ def test_merge_continuation_rows_preserves_dense_rows():
 
 def test_merge_continuation_rows_empty():
     assert convert._merge_continuation_rows([]) == []
+
+
+# --- _extract_page_text_with_regions ---
+
+
+def test_extract_page_text_with_regions_matches_legacy_table_path(tmp_path):
+    """With only table regions, the new function matches the old behavior.
+
+    We build a tiny PDF whose first page has a one-line caption + prose,
+    and pass a table region list to _extract_page_text_with_regions. The
+    output should contain the markdown region and the surrounding prose.
+    """
+    import fitz
+
+    from tests import fixtures
+
+    pdf = fixtures.build_text_pdf(tmp_path, pages=1, body="Surrounding prose line.")
+    with fitz.open(str(pdf)) as doc:
+        page = doc[0]
+        # Fake table region in the middle of the page.
+        rect_md = "**TABLE 1** | a | b |\n|---|---|\n| 1 | 2 |"
+        regions = [(200.0, 260.0, rect_md)]
+        result = convert._extract_page_text_with_regions(page, regions)
+    assert "Surrounding prose line" in result
+    assert "| a | b |" in result

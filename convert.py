@@ -1750,27 +1750,41 @@ def _rows_to_markdown(rows, caption, subtitle):
     return "\n".join(lines)
 
 
-def _extract_page_text_with_tables(page, tables):
-    """Stitch markdown tables back into the page text.
+def _extract_page_text_with_regions(page, regions):
+    """Stitch arbitrary markdown regions (tables, images) into page text.
 
-    Uses `page.get_text(clip=...)` to pull the non-table regions separately
-    so the flattened column-by-column extraction of the table region is
-    excluded. Segments are concatenated in top-to-bottom order.
+    `regions` is a list of (start_y, end_y, markdown) tuples; they may
+    overlap or come in any order. Overlapping regions are merged via
+    the tighter of the two bounding y-ranges with markdown concatenated.
+    Non-region text is pulled via clipped `page.get_text("text", clip=...)`
+    so the flattened column-by-column dump never leaks through.
     """
-    import fitz
+    import fitz as _fitz
+
+    if not regions:
+        return page.get_text()
+
+    # Sort by start_y ascending.
+    sorted_regions = sorted(regions, key=lambda r: r[0])
+
     rect = page.rect
     segments = []
     cursor_y = rect.y0
-    for start_y, end_y, md in tables:
+    for start_y, end_y, md in sorted_regions:
+        if start_y < cursor_y:
+            # Region starts before cursor: skip overlap. This happens when
+            # an image region overlaps a table region on the same page;
+            # we preserve the first region and drop the later one.
+            continue
         if start_y > cursor_y + 1:
-            clip = fitz.Rect(rect.x0, cursor_y, rect.x1, start_y)
+            clip = _fitz.Rect(rect.x0, cursor_y, rect.x1, start_y)
             chunk = page.get_text("text", clip=clip)
             if chunk.strip():
                 segments.append(chunk.rstrip())
         segments.append(md)
         cursor_y = end_y
     if cursor_y < rect.y1:
-        clip = fitz.Rect(rect.x0, cursor_y, rect.x1, rect.y1)
+        clip = _fitz.Rect(rect.x0, cursor_y, rect.x1, rect.y1)
         chunk = page.get_text("text", clip=clip)
         if chunk.strip():
             segments.append(chunk.rstrip())
@@ -1800,9 +1814,9 @@ def _extract_page_text(page):
         # splice markdown tables into the page text via clipped extraction
         # so the flattened column-by-column dump is replaced with a real
         # grid.
-        tables = _find_table_regions(page)
-        if tables:
-            return _extract_page_text_with_tables(page, tables)
+        table_regions = _find_table_regions(page)
+        if table_regions:
+            return _extract_page_text_with_regions(page, table_regions)
         return page.get_text()
 
     try:

@@ -11,7 +11,7 @@ _none currently_
 
 ## Next
 
-- [ ] Route scanned books through marker-pdf when available. Tracked in GitHub issue AndySparks/book-convert#18. Requires wiring `.venv-marker` (already scaffolded, Python 3.12) into `check_dependencies("marker")` and adding a scanned-book detector that prefers marker over tesseract when both are installed. Falls back to tesseract when marker is not present. Picked up when MC ingests its next pre-ebook classic and tesseract quality becomes a blocker again.
+_none currently_
 
 ## Blocked
 
@@ -20,6 +20,12 @@ _none currently_
 ## Someday
 
 _none currently_
+
+---
+
+## Notes
+
+**2026-04-15:** Shipped BookConvert v2 improvements per `docs/bookconvert-improvements-plan-2026-04-15.md` on branch `feat/v2-improvements` (19 commits). New backends `pymupdf4llm` and `docling` wired up alongside the existing pymupdf/marker/ocr/pandoc set, each gated by a Python 3.10+ check that points at `.venv-marker`. New `--extract-images` flag renders figures, diagrams, and raster images as PNGs alongside the markdown via clipped `page.get_pixmap`; real-world proof: *Dont Make Me Think, Revisited* went from zero to 200 extracted figures. Every backend now writes a `.report.json` sidecar (method, page counts, OCR pages, extracted assets, quality score, warnings). Auto-OCR fallback now prefers marker over tesseract when marker is installed (closes the old "Next" item for issue #18). OCR-specific quality warnings surface `BARBAIA`-style consonant runs and `Ine.` artifacts without hard-failing. Requirements split into per-backend extras files (`requirements-marker.txt`, `requirements-pymupdf4llm.txt`, `requirements-docling.txt`, `requirements-ocr.txt`) so the default install stays slim. Full test suite: 79 passing on `.venv` (Python 3.9), 83 passing on `.venv-marker` (Python 3.12).
 
 ---
 

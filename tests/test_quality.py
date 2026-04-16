@@ -71,3 +71,19 @@ def test_quality_strips_page_markers():
     text = "<!-- Page 1 -->\n\n" + CLEAN_ENGLISH
     score = convert._text_quality_score(text)
     assert score >= 0.7
+
+
+def test_ocr_warnings_detect_rough_text():
+    """Text with a high density of OCR-shape errors should produce warnings."""
+    rough = """
+    BARBAIA SWIX Ine. OSA
+    The n1anagen1ent Ine. decision. SWIX OSA was nnade by Ine.
+    BARBAIA is a well-known BARBAIA figure. SWIX, Ine., OSA, BARBAIA.
+    """ * 10
+    warnings = convert._ocr_quality_warnings(rough)
+    assert warnings, "Expected at least one OCR warning"
+
+
+def test_ocr_warnings_empty_for_clean_text():
+    clean = ("The organization is well-run and the leader is trusted. " * 30)
+    assert convert._ocr_quality_warnings(clean) == []

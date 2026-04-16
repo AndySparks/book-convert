@@ -187,6 +187,37 @@ def check_dependencies(method):
             )
 
 
+def _marker_available():
+    """Cheap check: is marker-pdf installed in the current interpreter?
+
+    Uses the same logic as `check_dependencies("marker")` but returns a
+    bool instead of raising. Called by pick_ocr_backend to decide where
+    to route a scanned PDF.
+    """
+    if sys.version_info < (3, 10):
+        return False
+    try:
+        venv_bin = Path(sys.executable).parent
+        marker_bin = venv_bin / "marker_single"
+        if marker_bin.exists():
+            return True
+        return shutil.which("marker_single") is not None
+    except Exception:
+        return False
+
+
+def pick_ocr_backend():
+    """Choose between 'marker' and 'ocr' for scanned PDFs.
+
+    Returns 'marker' when marker-pdf is installed (it handles scanned
+    PDFs via its own layout-aware OCR pipeline and produces cleaner
+    output than raw tesseract). Otherwise falls back to 'ocr'.
+    """
+    if _marker_available():
+        return "marker"
+    return "ocr"
+
+
 _WORD_ORDINALS = (
     r'first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth'
 )
@@ -318,6 +349,44 @@ def _text_quality_score(text, min_chars=500):
     #   Pyramid Principle (bad pymupdf): ~19.5 per 10k (n1 + vv combined)
     # Any density above ~1.0 means the extraction is broken.
     return max(0.0, 1.0 - density_per_10k / 2.0)
+
+
+# OCR-specific error shapes. These almost never appear in clean English.
+_OCR_ERROR_PATTERNS = (
+    # Consonant-only run of 4+ letters: "SWIX", "BARBAIA" (note: 4+ to avoid USA/NFL).
+    re.compile(r'\b[B-DF-HJ-NP-TV-Z]{4,}\b'),
+    # "Ine." — OCR mistakes "Inc." for "Ine.". Very common.
+    re.compile(r'\bIne\.\b'),
+    # Letter-digit-letter (same as _ARTIFACT_PATTERNS but counted as warning).
+    re.compile(r'[a-z]\d[a-z]', re.IGNORECASE),
+)
+
+
+def _ocr_quality_warnings(text):
+    """Return a list of human-readable warnings about OCR output quality.
+
+    Unlike _text_quality_score (which produces a 0..1 score for hard-gating),
+    these warnings are informational. They get surfaced in the sidecar
+    report so the user knows a given OCR run was noisy.
+    """
+    cleaned = _MARKDOWN_STRIP_RE.sub(' ', text)
+    n_chars = len(cleaned)
+    if n_chars < 500:
+        return []
+
+    counts = {}
+    for p in _OCR_ERROR_PATTERNS:
+        counts[p.pattern] = len(p.findall(cleaned))
+
+    warnings = []
+    for name, count in counts.items():
+        density = count * 10000 / n_chars
+        if density >= 2.0:
+            warnings.append(
+                f"OCR quality: high density of artifacts matching {name!r} "
+                f"({count} matches, {density:.1f} per 10k chars)"
+            )
+    return warnings
 
 
 def _is_structural_line(stripped):
@@ -2417,6 +2486,8 @@ def convert_with_ocr(pdf_path, output_dir):
     report.total_pages = total_pages
     report.pages_with_text = pages_with_text
     report.ocr_pages = total_pages
+    extracted = output_file.read_text(encoding="utf-8", errors="replace")
+    report.warnings.extend(_ocr_quality_warnings(extracted))
     report_path = output_file.with_suffix(".report.json")
     write_report(report_path, report)
     return report
@@ -2635,10 +2706,15 @@ def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False, extrac
             and method != "ocr"
             and any(t in error_msg for t in auto_ocr_triggers)
         ):
-            print(f"  Text extraction failed, auto-retrying with OCR...")
+            chosen = pick_ocr_backend()
+            print(f"  Text extraction failed, auto-retrying with {chosen}...")
             try:
-                check_dependencies("ocr")
-                return convert_with_ocr(book_path, output_dir)
+                check_dependencies(chosen)
+                if chosen == "marker":
+                    result = convert_with_marker(book_path, output_dir)
+                else:
+                    result = convert_with_ocr(book_path, output_dir)
+                return bool(result)
             except DependencyError as dep_e:
                 print(f"  OCR fallback unavailable: {dep_e}")
                 return False

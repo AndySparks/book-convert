@@ -55,3 +55,15 @@ def test_cli_accepts_docling_method():
             convert.main()
     finally:
         _sys.argv = old_argv
+
+
+def test_pick_ocr_backend_prefers_marker_when_available(monkeypatch):
+    """When marker is importable, pick_ocr_backend returns 'marker'."""
+    monkeypatch.setattr(convert, "_marker_available", lambda: True)
+    assert convert.pick_ocr_backend() == "marker"
+
+
+def test_pick_ocr_backend_falls_back_to_ocr(monkeypatch):
+    """When marker is not available, pick_ocr_backend returns 'ocr'."""
+    monkeypatch.setattr(convert, "_marker_available", lambda: False)
+    assert convert.pick_ocr_backend() == "ocr"

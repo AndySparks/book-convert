@@ -66,3 +66,48 @@ def test_find_vector_regions_empty_on_text_only_pdf(tmp_path):
     with fitz.open(str(pdf)) as doc:
         regions = assets.find_vector_regions(doc[0])
     assert regions == []
+
+
+# --- extract_page_assets end-to-end ---
+
+
+def test_extract_page_assets_renders_png_and_returns_markdown(tmp_path):
+    pdf = fixtures.build_figure_pdf(tmp_path)
+    asset_dir = tmp_path / "assets"
+    with fitz.open(str(pdf)) as doc:
+        results = assets.extract_page_assets(
+            doc[0], stem="figure", asset_dir=asset_dir, page_num=1
+        )
+    assert len(results) >= 1
+    rect, md = results[0]
+
+    # Rendered PNG exists on disk.
+    assert asset_dir.exists()
+    pngs = list(asset_dir.glob("*.png"))
+    assert len(pngs) >= 1
+
+    # Markdown is an image reference pointing into the asset dir.
+    assert md.startswith("![")
+    assert "figure_assets" in md or str(asset_dir.name) in md
+
+
+def test_extract_page_assets_associates_caption(tmp_path):
+    pdf = fixtures.build_figure_pdf(tmp_path)
+    asset_dir = tmp_path / "assets"
+    with fitz.open(str(pdf)) as doc:
+        results = assets.extract_page_assets(
+            doc[0], stem="figure", asset_dir=asset_dir, page_num=1
+        )
+    rect, md = results[0]
+    # The caption "Figure 1.1 The four-quadrant model." should be the alt text.
+    assert "Figure 1.1" in md
+
+
+def test_extract_page_assets_empty_on_text_only_pdf(tmp_path):
+    pdf = fixtures.build_text_pdf(tmp_path, pages=1)
+    asset_dir = tmp_path / "assets"
+    with fitz.open(str(pdf)) as doc:
+        results = assets.extract_page_assets(
+            doc[0], stem="text", asset_dir=asset_dir, page_num=1
+        )
+    assert results == []

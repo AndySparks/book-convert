@@ -13,6 +13,7 @@ Three sources feed the region list:
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import List, Tuple
 
 import fitz
@@ -118,3 +119,112 @@ def _rects_close(a: fitz.Rect, b: fitz.Rect, gap: float) -> bool:
     # Expand `a` by `gap` on all sides and test intersection.
     expanded = fitz.Rect(a.x0 - gap, a.y0 - gap, a.x1 + gap, a.y1 + gap)
     return expanded.intersects(b)
+
+
+# Pad each region by this many PDF points before rendering so captions
+# and borders don't get cropped.
+REGION_PADDING = 4
+# Caption must be within this many points below the region.
+CAPTION_SEARCH_DISTANCE = 40
+# DPI for rendered assets.
+ASSET_DPI = 220
+
+
+def extract_page_assets(
+    page: fitz.Page,
+    stem: str,
+    asset_dir: Path,
+    page_num: int,
+) -> List[Tuple[fitz.Rect, str]]:
+    """Render all figure regions on a page and return (rect, markdown) pairs.
+
+    `stem` is the markdown output filename without extension — used to
+    build an asset subdirectory name. `page_num` is the 1-indexed page
+    number used in the asset filename.
+    """
+    raster = find_raster_regions(page)
+    vector = find_vector_regions(page)
+
+    # Combine and merge overlapping regions.
+    combined = _merge_rects(raster + vector, gap=REGION_PADDING)
+    if not combined:
+        return []
+
+    asset_dir = Path(asset_dir)
+    asset_dir.mkdir(parents=True, exist_ok=True)
+
+    # Harvest caption candidates from page text.
+    captions = _find_caption_candidates(page)
+
+    results: List[Tuple[fitz.Rect, str]] = []
+    for idx, rect in enumerate(combined):
+        caption_text = _match_caption(rect, captions)
+        padded = fitz.Rect(
+            max(0, rect.x0 - REGION_PADDING),
+            max(0, rect.y0 - REGION_PADDING),
+            min(page.rect.x1, rect.x1 + REGION_PADDING),
+            min(page.rect.y1, rect.y1 + REGION_PADDING),
+        )
+        asset_name = f"page-{page_num:04d}-figure-{idx + 1:02d}.png"
+        asset_path = asset_dir / asset_name
+        try:
+            pix = page.get_pixmap(dpi=ASSET_DPI, clip=padded, alpha=False)
+            pix.save(str(asset_path))
+        except Exception:
+            continue
+
+        rel = f"{asset_dir.name}/{asset_name}"
+        alt = caption_text if caption_text else f"Figure on page {page_num}"
+        md = f"![{alt}]({rel})"
+        if caption_text:
+            md = f"{md}\n\n*{caption_text}*"
+        results.append((padded, md))
+    return results
+
+
+def _find_caption_candidates(page: fitz.Page) -> List[Tuple[fitz.Rect, str]]:
+    """Return (bbox, text) pairs for lines on the page that match CAPTION_RE."""
+    try:
+        page_dict = page.get_text("dict")
+    except Exception:
+        return []
+    out: List[Tuple[fitz.Rect, str]] = []
+    for block in page_dict.get("blocks", []):
+        if block.get("type") != 0:  # text blocks only
+            continue
+        for line in block.get("lines", []):
+            text = " ".join(
+                span.get("text", "") for span in line.get("spans", [])
+            ).strip()
+            if not text:
+                continue
+            if CAPTION_RE.match(text):
+                bbox = line.get("bbox")
+                if not bbox:
+                    continue
+                out.append((fitz.Rect(*bbox), text))
+    return out
+
+
+def _match_caption(
+    region: fitz.Rect,
+    captions: List[Tuple[fitz.Rect, str]],
+):
+    """Return the closest caption within CAPTION_SEARCH_DISTANCE below region."""
+    best = None
+    best_dist = float("inf")
+    for bbox, text in captions:
+        # Caption must be below (or overlapping) the region, roughly
+        # within its horizontal span.
+        if bbox.y0 < region.y0:
+            continue
+        dy = bbox.y0 - region.y1
+        if dy > CAPTION_SEARCH_DISTANCE:
+            continue
+        # Horizontal overlap check: caption intersects region's x-range.
+        if bbox.x1 < region.x0 or bbox.x0 > region.x1:
+            continue
+        if dy < best_dist:
+            best_dist = dy
+            best = text
+    return best

@@ -136,6 +136,40 @@ def check_dependencies(method):
                 lines.append(f"  - {dep}")
             raise DependencyError("\n".join(lines))
 
+    elif method == "pymupdf4llm":
+        if sys.version_info < (3, 10):
+            raise DependencyError(
+                "pymupdf4llm requires Python 3.10 or newer (current venv is "
+                f"{sys.version_info.major}.{sys.version_info.minor}).\n"
+                "  Use the .venv-marker (Python 3.12) venv:\n"
+                "    .venv-marker/bin/pip install -r requirements-pymupdf4llm.txt\n"
+                "    .venv-marker/bin/python convert.py --method pymupdf4llm <pdf>"
+            )
+        try:
+            import pymupdf4llm  # noqa: F401
+        except ImportError:
+            raise DependencyError(
+                "Missing dependency: pymupdf4llm.\n"
+                "  .venv-marker/bin/pip install -r requirements-pymupdf4llm.txt"
+            )
+
+    elif method == "docling":
+        if sys.version_info < (3, 10):
+            raise DependencyError(
+                "docling requires Python 3.10 or newer (current venv is "
+                f"{sys.version_info.major}.{sys.version_info.minor}).\n"
+                "  Use the .venv-marker (Python 3.12) venv:\n"
+                "    .venv-marker/bin/pip install -r requirements-docling.txt\n"
+                "    .venv-marker/bin/python convert.py --method docling <pdf>"
+            )
+        try:
+            import docling  # noqa: F401
+        except ImportError:
+            raise DependencyError(
+                "Missing dependency: docling.\n"
+                "  .venv-marker/bin/pip install -r requirements-docling.txt"
+            )
+
     elif method == "pandoc":
         # EPUB conversion shells out to pandoc. We check for the binary on
         # PATH rather than importing a Python wrapper because pandoc is a
@@ -2603,9 +2637,9 @@ def main():
     parser.add_argument(
         "--method",
         "-m",
-        choices=["pymupdf", "marker", "ocr"],
+        choices=["pymupdf", "pymupdf4llm", "marker", "docling", "ocr"],
         default="pymupdf",
-        help="Conversion method (default: pymupdf)",
+        help="Conversion method (default: pymupdf). pymupdf4llm and docling require Python 3.10+.",
     )
     # Keep --ocr as a shortcut for backwards compatibility
     parser.add_argument(

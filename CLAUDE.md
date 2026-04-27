@@ -2,7 +2,9 @@
 
 This project converts PDF books to clean Markdown files for use in Claude Projects and other LLM tools.
 
-**Read @docs/TASKS.md** at session start for the rolling punch list of work in flight. BookConvert does not carry a full STRATEGY.md; strategic context lives upstream in Management Craft's `docs/STRATEGY.md` under the MC Research Loop Acquire step.
+**Spine status:** partially spined as of 2026-04-27. See `8-DECISIONS/2026-04-27-spine-adoption.md` for what travelled and what's an explicit divergence from the OS reference implementation. Spine vocabulary (the spine, spined, spine adoption, spine-native): `~/operating-system/8-DECISIONS/2026-04-27-spine-portability.md`.
+
+**Read @1-ROADMAP.md** at session start for the rolling punch list of work in flight (Now / Next / Blocked / Someday). Renamed from `docs/TASKS.md` on 2026-04-27 for spine alignment. BookConvert does not carry a full `0-STRATEGY.md`; strategic context lives upstream in Management Craft's `docs/0-STRATEGY.md` under the MC Research Loop Acquire step.
 
 ### Boil the ocean
 

@@ -1,9 +1,18 @@
-# BookConvert Tasks
+---
+type: roadmap
+scope: bookconvert
+status: active
+last_updated: 2026-04-27
+---
 
-> Rolling punch list. Update as work moves; drop items the moment they're done.
+# BookConvert — Roadmap
+
+> Rolling punch list (Now / Next / Blocked / Someday). Update as work moves; drop items the moment they're done.
 > Loaded into Claude sessions automatically via `CLAUDE.md`.
 >
-> BookConvert is a small tool and does not carry a `docs/STRATEGY.md`. For strategic context on why it exists, see the Management Craft STRATEGY.md under the MC Research Loop Acquire step. Publicly trackable bugs and features live in GitHub Issues at https://github.com/AndySparks/book-convert/issues.
+> Renamed from `docs/TASKS.md` on 2026-04-27 as part of the spine adoption (`8-DECISIONS/2026-04-27-spine-adoption.md`). Same role, spine-aligned filename and frontmatter.
+>
+> BookConvert is a small tool and does not carry a `0-STRATEGY.md`. For strategic context on why it exists, see the Management Craft STRATEGY.md under the MC Research Loop Acquire step. Publicly trackable bugs and features live in GitHub Issues at https://github.com/AndySparks/book-convert/issues.
 
 ## Now
 

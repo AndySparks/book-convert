@@ -2624,10 +2624,12 @@ def convert_with_pymupdf4llm(pdf_path, output_dir):
     title = clean_title(pdf_path.stem)
     output_file = output_dir / f"{pdf_path.stem}.md"
 
-    # pymupdf4llm returns the full markdown as a string. It also writes
-    # images into an accompanying directory if we pass write_images=True;
-    # we use the same naming convention as the marker backend so the
-    # output directory structure is consistent.
+    # pymupdf4llm returns the full markdown as a string by default, OR
+    # a list of per-page dicts when page_chunks=True. We use page_chunks
+    # so we can emit the same `<!-- Page N -->` markers BookConvert's
+    # default pymupdf backend produces, downstream tools (Management
+    # Craft's VKM extraction pipeline) rely on those markers to derive
+    # citation addresses.
     # pymupdf4llm sanitizes spaces in image_path to underscores when it
     # writes the PNGs, so we must sanitize the directory name ourselves
     # before mkdir — otherwise we'd create "Stem With Spaces_images/" and
@@ -2636,12 +2638,25 @@ def convert_with_pymupdf4llm(pdf_path, output_dir):
     safe_stem = re.sub(r"\s+", "_", pdf_path.stem)
     image_dir = output_dir / f"{safe_stem}_images"
     image_dir.mkdir(parents=True, exist_ok=True)
-    markdown = pymupdf4llm.to_markdown(
+    page_chunks = pymupdf4llm.to_markdown(
         str(pdf_path),
         write_images=True,
         image_path=str(image_dir),
         image_format="png",
+        page_chunks=True,
     )
+
+    # Stitch chunks with `<!-- Page N -->` markers between them.
+    # pymupdf4llm's metadata.page_number is already 1-indexed (matches the
+    # pymupdf backend's convention at line ~2280 above). Use it directly;
+    # fall back to a 1-based enumeration if the key is missing for some
+    # malformed PDF.
+    body_parts = []
+    for idx, chunk in enumerate(page_chunks, start=1):
+        page_num = chunk.get("metadata", {}).get("page_number", idx)
+        chunk_text = chunk.get("text", "")
+        body_parts.append(f"<!-- Page {page_num} -->\n\n{chunk_text}")
+    markdown = "\n\n".join(body_parts)
 
     header = (
         f"# {title}\n\n"

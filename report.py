@@ -28,6 +28,8 @@ class ConversionReport:
     extracted_assets: int = 0
     quality_score: float = 1.0
     skipped_toc_pages: int = 0
+    cleaned: bool = False
+    cleanup: dict = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:

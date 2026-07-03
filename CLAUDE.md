@@ -21,8 +21,9 @@ The marginal cost of completeness is near zero with AI. Do the whole thing. Do i
 7. `--method ocr` or `--ocr` — tesseract OCR for scanned/image-based PDFs
 8. EPUB files always route through pandoc regardless of `--method`
 9. Add `--extract-images` (pymupdf backend only) to render figures, diagrams, and raster images as PNGs in a sibling `<stem>_assets/` dir with inline markdown references
-10. Every conversion writes a `<stem>.report.json` sidecar: method, page counts, OCR pages, extracted assets, quality score, warnings
-11. Converted markdown files appear in `output/`
+10. A verbatim-safe **cleanup pass runs by default** on every conversion (`cleanup.py`): it de-joins dropped-space function-word joins ("thefrozen" -> "the frozen"), fixes stray-consonant citation ghosts ("—wWilliam" -> "—William"), and unwraps picture-text TOC tables while dropping OCR garble blocks. Pass `--no-clean` to skip it. The de-join needs `pyspellchecker` (in `requirements.txt`) and degrades gracefully if absent (dictionary-free repairs still run; a warning is recorded).
+11. Every conversion writes a `<stem>.report.json` sidecar: method, page counts, OCR pages, extracted assets, quality score, `cleaned`/`cleanup` stats, warnings
+12. Converted markdown files appear in `output/`
 
 ## When helping users
 
@@ -56,6 +57,7 @@ After every conversion run, automatically spot-check each converted file:
 Install layout: default `.venv` (Python 3.7+) for text extraction; `.venv-marker` (Python 3.10+) for the ML-backed extras.
 
 - `pymupdf` — default converter, fast text extraction via PyMuPDF/fitz (`requirements.txt`)
+- `pyspellchecker` — dictionary for the default-on cleanup pass's de-join step, pure-Python, Python 3.7+ (`requirements.txt`); cleanup degrades gracefully if it is missing
 - `pymupdf4llm` — PyMuPDF's LLM-oriented markdown exporter with image extraction, Python 3.10+ (`requirements-pymupdf4llm.txt`)
 - `marker-pdf` — highest quality markdown conversion, Python 3.10+ (`requirements-marker.txt`)
 - `docling` — IBM's layout-aware pipeline (tables, formulas, images), Python 3.10+ (`requirements-docling.txt`)

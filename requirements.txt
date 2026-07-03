@@ -1,1 +1,5 @@
 pymupdf
+# Dictionary for the default-on post-conversion cleanup pass (dropped-space
+# de-join). Pure-Python, no native build; cleanup degrades gracefully if it
+# is ever absent (the dictionary-free repairs still run). See cleanup.py.
+pyspellchecker

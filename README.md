@@ -22,8 +22,9 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-This installs PyMuPDF only and gives you the default text-extraction
-backend. Works on Python 3.7+.
+This installs PyMuPDF plus `pyspellchecker` (a small pure-Python dictionary
+used by the default-on cleanup pass) and gives you the default
+text-extraction backend. Works on Python 3.7+.
 
 ### Optional backends (install into .venv-marker)
 
@@ -91,11 +92,39 @@ diagrams, and embedded raster images as PNGs in a sibling directory
 (`output/<stem>_assets/`) and inserts markdown image references into
 the body text at the right page position.
 
+### Post-conversion cleanup (on by default)
+
+Every conversion runs a verbatim-safe cleanup pass over the emitted
+markdown that repairs the extraction artifacts no backend fixes on its own:
+
+- **Dropped-space joins** where a function word is glued to its neighbour
+  (`thefrozen` → `the frozen`, `sucha` → `such a`). The joined form is never
+  a real English word, so splitting *restores* the author's text.
+- **Stray-consonant citation ghosts** (`—wWilliam Golding` → `—William Golding`).
+- **Picture-text blocks**: a real Table of Contents rendered as a table is
+  unwrapped and kept; OCR garble (ISBN barcodes, etc.) is dropped.
+
+The pass is designed never to mangle a real word: it only splits at a
+whitelisted function-word boundary, so British spellings (`colour`),
+coinages (`givenness`), proper nouns, and quoted literary coinages
+(Joyce's `moocow`) pass through untouched. What it changed is recorded in
+the sidecar report under `cleanup`.
+
+```bash
+python convert.py input/MyBook.pdf              # cleanup runs automatically
+python convert.py input/MyBook.pdf --no-clean   # skip it
+```
+
+The de-join step uses `pyspellchecker` (installed by `requirements.txt`). If
+it is ever missing, cleanup degrades gracefully — the dictionary-free repairs
+still run and a warning is recorded.
+
 ### Sidecar conversion report
 
 Every conversion writes a `<stem>.report.json` alongside the markdown
 containing: method used, page count, OCR pages, extracted assets,
-quality score, and any warnings. Useful for inspecting a batch run:
+quality score, `cleaned`/`cleanup` stats, and any warnings. Useful for
+inspecting a batch run:
 
 ```bash
 jq '.method,.extracted_assets,.quality_score' output/*.report.json

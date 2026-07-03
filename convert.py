@@ -36,6 +36,7 @@ log = logging.getLogger("bookconvert")
 
 from report import ConversionReport, write_report
 import assets
+import cleanup
 
 
 class DependencyError(Exception):
@@ -2624,10 +2625,12 @@ def convert_with_pymupdf4llm(pdf_path, output_dir):
     title = clean_title(pdf_path.stem)
     output_file = output_dir / f"{pdf_path.stem}.md"
 
-    # pymupdf4llm returns the full markdown as a string. It also writes
-    # images into an accompanying directory if we pass write_images=True;
-    # we use the same naming convention as the marker backend so the
-    # output directory structure is consistent.
+    # pymupdf4llm returns the full markdown as a string by default, OR
+    # a list of per-page dicts when page_chunks=True. We use page_chunks
+    # so we can emit the same `<!-- Page N -->` markers BookConvert's
+    # default pymupdf backend produces, downstream tools (Management
+    # Craft's VKM extraction pipeline) rely on those markers to derive
+    # citation addresses.
     # pymupdf4llm sanitizes spaces in image_path to underscores when it
     # writes the PNGs, so we must sanitize the directory name ourselves
     # before mkdir — otherwise we'd create "Stem With Spaces_images/" and
@@ -2636,11 +2639,38 @@ def convert_with_pymupdf4llm(pdf_path, output_dir):
     safe_stem = re.sub(r"\s+", "_", pdf_path.stem)
     image_dir = output_dir / f"{safe_stem}_images"
     image_dir.mkdir(parents=True, exist_ok=True)
-    markdown = pymupdf4llm.to_markdown(
+    page_chunks = pymupdf4llm.to_markdown(
         str(pdf_path),
         write_images=True,
         image_path=str(image_dir),
         image_format="png",
+        page_chunks=True,
+    )
+
+    # Stitch chunks with `<!-- Page N -->` markers between them.
+    # pymupdf4llm's metadata.page_number is already 1-indexed (matches the
+    # pymupdf backend's convention at line ~2280 above). Use it directly;
+    # fall back to a 1-based enumeration if the key is missing for some
+    # malformed PDF.
+    body_parts = []
+    for idx, chunk in enumerate(page_chunks, start=1):
+        page_num = chunk.get("metadata", {}).get("page_number", idx)
+        chunk_text = chunk.get("text", "")
+        body_parts.append(f"<!-- Page {page_num} -->\n\n{chunk_text}")
+    markdown = "\n\n".join(body_parts)
+
+    # pymupdf4llm embeds the full `image_path` we passed as the literal ref
+    # prefix, e.g. `![](output/Stem_images/x.png)` — or an absolute/symlink-
+    # canonicalized path like `/private/tmp/.../Stem_images/x.png`. Either way
+    # it is not relative to this markdown file (which lives *inside* the output
+    # dir), so refs break the moment the file is opened or moved. Strip any
+    # leading directory so every ref is relative to the markdown itself,
+    # matching what the default pymupdf backend already emits (`{stem}_images/`
+    # at ~line 2392).
+    markdown = re.sub(
+        r'\]\((?:[^)]*/)?' + re.escape(f"{safe_stem}_images/"),
+        f"]({safe_stem}_images/",
+        markdown,
     )
 
     header = (
@@ -2711,7 +2741,38 @@ def convert_with_docling(pdf_path, output_dir):
     return report
 
 
-def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False, extract_images=False):
+def _apply_cleanup(result):
+    """Run the post-conversion cleanup pass on a backend's markdown output.
+
+    Reads the markdown named by `result.output`, repairs extraction artifacts
+    (see cleanup.clean_markdown), rewrites the file, and records what changed
+    on the report (including a rewritten sidecar). Verbatim-safe and
+    idempotent; a no-op if there is nothing to fix. Returns the report.
+    """
+    if not isinstance(result, ConversionReport) or not result.output:
+        return result
+    md_path = Path(result.output)
+    if md_path.suffix.lower() != ".md" or not md_path.exists():
+        return result
+
+    original = md_path.read_text(encoding="utf-8", errors="replace")
+    cleaned, stats = cleanup.clean_markdown(original)
+    if cleaned != original:
+        md_path.write_text(cleaned, encoding="utf-8", errors="replace")
+
+    result.cleaned = True
+    result.cleanup = stats
+    if not stats.get("dejoin_available"):
+        result.warnings.append(
+            "cleanup: de-join pass skipped (pyspellchecker not installed; "
+            "`pip install -r requirements.txt` to enable dropped-space repair)"
+        )
+    write_report(md_path.with_suffix(".report.json"), result)
+    return result
+
+
+def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False,
+                 extract_images=False, clean=True):
     """Convert a single book (PDF or EPUB) to markdown.
 
     Returns True on success, False on failure. Never raises.
@@ -2719,6 +2780,9 @@ def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False, extrac
     if auto_ocr is True and pymupdf/marker fails due to scanned content,
     automatically retries with OCR.
     When extract_images is True, figures are rendered as PNGs (pymupdf only).
+    When clean is True (default), a verbatim-safe post-conversion pass repairs
+    common extraction artifacts (dropped-space joins, stray-consonant citation
+    ghosts, picture-text garble) on the emitted markdown.
     """
     book_path = Path(book_path)
     output_dir = Path(output_dir)
@@ -2742,6 +2806,8 @@ def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False, extrac
             result = convert_with_pymupdf(book_path, output_dir, extract_images=extract_images)
         # Backends return either True (legacy) or a ConversionReport.
         # Treat any non-False truthy value as success.
+        if clean:
+            result = _apply_cleanup(result)
         return bool(result)
     except ConversionError as e:
         error_msg = str(e).lower()
@@ -2760,6 +2826,8 @@ def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False, extrac
                     result = convert_with_marker(book_path, output_dir)
                 else:
                     result = convert_with_ocr(book_path, output_dir)
+                if clean:
+                    result = _apply_cleanup(result)
                 return bool(result)
             except DependencyError as dep_e:
                 print(f"  OCR fallback unavailable: {dep_e}")
@@ -2893,6 +2961,13 @@ def main():
         help="Skip dependency check",
     )
     parser.add_argument(
+        "--no-clean",
+        action="store_true",
+        help="Skip the post-conversion cleanup pass (dropped-space de-join, "
+             "stray-consonant citation fixes, picture-text garble removal). "
+             "Cleanup runs by default and is verbatim-safe.",
+    )
+    parser.add_argument(
         "--archive",
         action="store_true",
         help="After a successful conversion, move the source book from "
@@ -2994,6 +3069,7 @@ def main():
             method=method,
             auto_ocr=args.auto_ocr,
             extract_images=args.extract_images,
+            clean=not args.no_clean,
         ):
             success += 1
             converted_books.append(book)

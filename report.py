@@ -37,6 +37,18 @@ class ConversionReport:
     # failure mode a spot-check of three pages will not catch.
     tables_emitted: int = 0
     table_captions_seen: int = 0
+    # Page-locator signals. `page_numbering` declares what kind of address
+    # this conversion can produce: "printed" (a real page number appears
+    # on the page), "pdf_only" (PDF page index only), or "none" (the
+    # backend emits no locators at all). `page_printed_offset` is
+    # page_printed - page_pdf, meaningful only when
+    # `page_printed_offset_consistent` is True.
+    page_numbering: str = "none"
+    page_printed_count: int = 0
+    page_locator_count: int = 0
+    page_printed_coverage: float = 0.0
+    page_printed_offset: int | None = None
+    page_printed_offset_consistent: bool = False
     warnings: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:

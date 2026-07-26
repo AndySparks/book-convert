@@ -873,6 +873,31 @@ def _derive_folio_offset(folio_by_sheet):
     return (None, False)
 
 
+# What kind of page address each backend can produce. `pymupdf` is absent
+# because it decides at runtime (printed when folios were captured,
+# sheet-only otherwise) — see convert_with_pymupdf.
+BACKEND_LOCATOR_TYPE = {
+    "ocr": "sheet-only",
+    "pymupdf4llm": "sheet-only",
+    "marker": "none",
+    "pandoc": "none",
+    "docling": "none",
+}
+
+
+def _apply_backend_locator_type(report):
+    """Stamp a backend's fixed locator capability onto its report.
+
+    Backends that cannot produce a printed page number must declare it, so
+    the ingestion gate can route away from them instead of silently filing
+    a source that can never be cited by page.
+    """
+    fixed = BACKEND_LOCATOR_TYPE.get(report.method)
+    if fixed:
+        report.locator_type = fixed
+    return report
+
+
 def _merge_split_caps_headings(lines):
     """Merge runs of consecutive short ALL-CAPS lines into single heading lines.
 
@@ -2622,6 +2647,7 @@ def convert_with_marker(pdf_path, output_dir, marker_args=None):
             f"  tables: {report.tables_emitted} emitted / "
             f"{report.table_captions_seen} captions seen"
         )
+        _apply_backend_locator_type(report)
         report_path = target.with_suffix(".report.json")
         write_report(report_path, report)
         return report
@@ -2669,7 +2695,7 @@ def convert_with_ocr(pdf_path, output_dir):
                 text = pytesseract.image_to_string(images[0])
                 if text.strip():
                     pages_with_text += 1
-                    f.write(f"<!-- Page {i} -->\n\n")
+                    f.write(f"<!-- Page sheet={i} folio=none -->\n\n")
                     cleaned = clean_text(text.strip())
                     cleaned = _format_headings(cleaned)
                     cleaned = _format_toc(cleaned)
@@ -2689,6 +2715,7 @@ def convert_with_ocr(pdf_path, output_dir):
     # it makes the OCR backend's table blindness visible in the sidecar
     # instead of leaving it to be discovered during a scholarly pass.
     apply_table_signals(report, output_file)
+    _apply_backend_locator_type(report)
     report_path = output_file.with_suffix(".report.json")
     write_report(report_path, report)
     return report
@@ -2827,10 +2854,9 @@ def convert_with_pymupdf4llm(pdf_path, output_dir):
 
     # pymupdf4llm returns the full markdown as a string by default, OR
     # a list of per-page dicts when page_chunks=True. We use page_chunks
-    # so we can emit the same `<!-- Page N -->` markers BookConvert's
-    # default pymupdf backend produces, downstream tools (Management
-    # Craft's VKM extraction pipeline) rely on those markers to derive
-    # citation addresses.
+    # so we can emit page markers between chunks. Markers use the shared
+    # sheet/folio locator format; pymupdf4llm returns pre-cleaned text, so
+    # no printed folio is recoverable here.
     # pymupdf4llm sanitizes spaces in image_path to underscores when it
     # writes the PNGs, so we must sanitize the directory name ourselves
     # before mkdir — otherwise we'd create "Stem With Spaces_images/" and
@@ -2847,8 +2873,8 @@ def convert_with_pymupdf4llm(pdf_path, output_dir):
         page_chunks=True,
     )
 
-    # Stitch chunks with `<!-- Page N -->` markers between them.
-    # pymupdf4llm's metadata.page_number is already 1-indexed (matches the
+    # Stitch chunks with `<!-- Page sheet={N} folio=none -->` markers between
+    # them. pymupdf4llm's metadata.page_number is already 1-indexed (matches the
     # pymupdf backend's convention at line ~2280 above). Use it directly;
     # fall back to a 1-based enumeration if the key is missing for some
     # malformed PDF.
@@ -2856,7 +2882,7 @@ def convert_with_pymupdf4llm(pdf_path, output_dir):
     for idx, chunk in enumerate(page_chunks, start=1):
         page_num = chunk.get("metadata", {}).get("page_number", idx)
         chunk_text = chunk.get("text", "")
-        body_parts.append(f"<!-- Page {page_num} -->\n\n{chunk_text}")
+        body_parts.append(f"<!-- Page sheet={page_num} folio=none -->\n\n{chunk_text}")
     markdown = "\n\n".join(body_parts)
 
     # pymupdf4llm embeds the full `image_path` we passed as the literal ref
@@ -2894,6 +2920,7 @@ def convert_with_pymupdf4llm(pdf_path, output_dir):
         pages_with_text=total_pages,  # pymupdf4llm handles its own detection
         extracted_assets=extracted_assets,
     )
+    _apply_backend_locator_type(report)
     write_report(output_file.with_suffix(".report.json"), report)
     return report
 
@@ -2937,6 +2964,7 @@ def convert_with_docling(pdf_path, output_dir):
         total_pages=total_pages,
         pages_with_text=total_pages,
     )
+    _apply_backend_locator_type(report)
     write_report(output_file.with_suffix(".report.json"), report)
     return report
 

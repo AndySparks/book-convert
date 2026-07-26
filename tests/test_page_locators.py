@@ -270,3 +270,23 @@ def test_renumbering_book_gets_no_interpolation_in_markdown(tmp_path):
     # Sheets 1-2 carry no printed number at all and stay `none`.
     assert "<!-- Page sheet=1 folio=none -->" in md
     assert "<!-- Page sheet=2 folio=none -->" in md
+
+
+LOCATOR_TYPES = {"printed", "sheet-only", "none"}
+
+
+@pytest.mark.parametrize("method,expected", [
+    ("marker", "none"),
+    ("pandoc", "none"),
+    ("docling", "none"),
+    ("ocr", "sheet-only"),
+    ("pymupdf4llm", "sheet-only"),
+])
+def test_backend_locator_declarations(method, expected):
+    import convert
+    report = convert.ConversionReport(
+        source="in.pdf", output="out.md", method=method,
+    )
+    convert._apply_backend_locator_type(report)
+    assert report.locator_type == expected
+    assert report.locator_type in LOCATOR_TYPES

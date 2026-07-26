@@ -121,3 +121,53 @@ def test_pymupdf_declares_sheet_only_when_no_folios(tmp_path):
     report = convert.convert_with_pymupdf(pdf, out_dir)
     assert report.folio_pages == 0
     assert report.locator_type == "sheet-only"
+
+
+def test_derive_offset_constant():
+    import convert
+    samples = {5: "1", 20: "16", 100: "96"}
+    offset, consistent = convert._derive_folio_offset(samples)
+    assert offset == -4
+    assert consistent is True
+
+
+def test_derive_offset_inconsistent_is_rejected():
+    """A book that renumbers partway through must not be interpolated."""
+    import convert
+    samples = {5: "1", 20: "16", 100: "40"}
+    offset, consistent = convert._derive_folio_offset(samples)
+    assert consistent is False
+
+
+def test_derive_offset_ignores_roman_folios():
+    import convert
+    samples = {2: "ii", 3: "iii", 10: "6", 20: "16", 30: "26"}
+    offset, consistent = convert._derive_folio_offset(samples)
+    assert offset == -4
+    assert consistent is True
+
+
+def test_derive_offset_needs_at_least_three_samples():
+    import convert
+    offset, consistent = convert._derive_folio_offset({5: "1", 20: "16"})
+    assert consistent is False
+
+
+def test_interpolates_folio_on_unnumbered_pages(tmp_path):
+    """A page whose printed folio was lost to OCR still gets an address."""
+    import convert
+    from tests import fixtures
+
+    pdf = fixtures.build_foliated_pdf(tmp_path, pages=12, offset=-4)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    report = convert.convert_with_pymupdf(pdf, out_dir)
+    md = (out_dir / f"{pdf.stem}.md").read_text(encoding="utf-8")
+
+    assert report.folio_offset == -4
+    assert report.folio_offset_consistent is True
+    # Sheets 1-4 are genuinely before page 1 — they must stay `none`,
+    # never a zero or negative folio.
+    assert "<!-- Page sheet=1 folio=none -->" in md
+    assert "folio=0" not in md
+    assert "folio=-" not in md

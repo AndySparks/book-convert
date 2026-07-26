@@ -817,6 +817,35 @@ def _strip_running_headers(pages_text):
     return result
 
 
+def _derive_folio_offset(folio_by_sheet):
+    """Derive a constant sheet->folio offset from captured samples.
+
+    Returns (offset, is_consistent). `offset` is folio - sheet. Consistency
+    requires at least 3 arabic samples that all agree; a book that renumbers
+    partway through (part-openers restarting at 1, roman-to-arabic front
+    matter) will disagree, and we refuse to interpolate rather than invent
+    page numbers. Roman folios never participate — they belong to a
+    separate numbering sequence.
+
+    Args:
+        folio_by_sheet: dict of sheet index -> folio string
+
+    Returns:
+        (int | None, bool)
+    """
+    offsets = [
+        int(folio) - sheet
+        for sheet, folio in folio_by_sheet.items()
+        if folio.isdigit()
+    ]
+    if len(offsets) < 3:
+        return (None, False)
+    first = offsets[0]
+    if all(o == first for o in offsets):
+        return (first, True)
+    return (None, False)
+
+
 def _merge_split_caps_headings(lines):
     """Merge runs of consecutive short ALL-CAPS lines into single heading lines.
 
@@ -2305,6 +2334,7 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=False):
     # folio (the only citation-valid address) as we go.
     cleaned_pages = _strip_running_headers(raw_pages)
     folio_by_sheet = {sheet: folio for sheet, _, folio in cleaned_pages if folio}
+    folio_offset, folio_consistent = _derive_folio_offset(folio_by_sheet)
 
     skipped_toc_pages = 0
 
@@ -2361,7 +2391,13 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=False):
                 skipped_toc_pages += 1
                 log.debug("Skipping broken TOC page %d", page_num)
                 continue
-            f.write(f"<!-- Page sheet={page_num} folio={folio or 'none'} -->\n\n")
+            effective_folio = folio
+            if effective_folio is None and folio_consistent:
+                candidate = page_num + folio_offset
+                # Never invent a folio for pages that precede printed page 1.
+                if candidate >= 1:
+                    effective_folio = str(candidate)
+            f.write(f"<!-- Page sheet={page_num} folio={effective_folio or 'none'} -->\n\n")
             f.write(cleaned)
             f.write("\n\n")
 
@@ -2375,6 +2411,8 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=False):
         if report.total_locator_pages else 0.0
     )
     report.locator_type = "printed" if report.folio_pages else "sheet-only"
+    report.folio_offset = folio_offset
+    report.folio_offset_consistent = folio_consistent
 
     # Check if we got enough text to consider this a real conversion
     if total_pages > 0 and (pages_with_text / total_pages) < MIN_TEXT_RATIO:

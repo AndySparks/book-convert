@@ -652,6 +652,24 @@ def _strip_running_headers(pages_text):
         list of (page_num, cleaned_text, folio) tuples, where folio is the
         printed page number captured from the running header/footer as a
         string ("47", "xii"), or None when the page carries none.
+
+    Stripping and capture are deliberately separate concerns. What gets
+    removed from the body text is unchanged from the pre-folio behavior;
+    what we are willing to *believe* is a printed page number is a strictly
+    narrower set. A folio we emit is presented to a reader as the number
+    printed on that page, so a wrong one is worse than none at all.
+
+    Folio candidates are collected as (rank, value) and the lowest rank
+    wins:
+
+        rank 0 — a standalone number on its own line near the page bottom
+        rank 1 — a standalone number on its own line near the page top
+
+    There is deliberately no rank for "a number trailing the last line of
+    body text". Such a number is still stripped (it is usually a footer
+    that extraction glued onto the preceding line), but it is never
+    captured: a page whose last sentence legitimately ends in a year would
+    otherwise publish "1999" as its printed page number.
     """
     if len(pages_text) < 5:
         return [(page_num, text, None) for page_num, text in pages_text]
@@ -730,7 +748,12 @@ def _strip_running_headers(pages_text):
     # Also detect standalone page-number lines (just a number, maybe with spaces)
     # Always strip these, even if no header/footer patterns were found
     standalone_pagenum = re.compile(r'^\s*\d{1,4}\s*$')
-    # Also match standalone roman numeral page numbers (front matter)
+    # Also match standalone roman numeral page numbers (front matter).
+    # NOTE: this is the STRIPPING test only, and it is intentionally loose
+    # (a bag of roman letters). Loosening or tightening it changes what
+    # disappears from the body text across every already-converted book.
+    # Whether a stripped line is believed to BE a folio is decided
+    # separately, by _is_roman_folio + the two-sample confirmation below.
     roman_pagenum = re.compile(
         r'^\s*[ivxlc]{1,7}\s*$', re.I
     )
@@ -782,10 +805,18 @@ def _strip_running_headers(pages_text):
             # Capture-then-strip standalone page numbers (arabic or roman).
             # This is the printed folio — the only address that is valid for
             # citation. It used to be discarded here.
+            #
+            # The strip condition is unchanged. The capture condition is
+            # narrower: an arabic run is taken at face value, but a roman
+            # line must parse as a real roman numeral (so "ill" and "civil"
+            # are stripped as before and captured never).
             if (is_near_top or is_near_bottom) and (
                 standalone_pagenum.match(stripped) or roman_pagenum.match(stripped)
             ):
-                folio_candidates.append((0 if is_near_bottom else 1, stripped))
+                if standalone_pagenum.match(stripped):
+                    folio_candidates.append((0 if is_near_bottom else 1, stripped))
+                elif _is_roman_folio(stripped.strip()):
+                    folio_candidates.append((0 if is_near_bottom else 1, stripped))
                 continue
 
             # Strip "CHAPTER TITLE | page" or "page | BOOK TITLE" running headers
@@ -796,25 +827,73 @@ def _strip_running_headers(pages_text):
                 log.debug("  Stripping pipe header/footer on page %d: %r", page_num, stripped)
                 continue
 
-            # Strip trailing page number appended to last line, capturing it
-            # as a last-resort folio candidate.
+            # Strip a trailing page number appended to the last line. This
+            # is a stripping rule ONLY — see the docstring. The number is
+            # NOT a folio candidate: the last line of a page legitimately
+            # ends in a number often enough ("...published in 1999") that
+            # capturing here publishes numbers that were never printed,
+            # poisons the offset derivation, and inflates folio_pages.
             if is_last:
                 m_trail = re.search(r'\s+(\d{1,4})\s*$', line)
                 if m_trail:
-                    folio_candidates.append((2, m_trail.group(1)))
                     line = line[:m_trail.start()]
 
             cleaned.append(line)
+        result.append((page_num, '\n'.join(cleaned), folio_candidates))
+
+    # Roman folios need corroboration. Real front matter runs several
+    # numbered pages, so >= 2 distinct roman captures across the document
+    # is cheap evidence that we are looking at a numbering sequence. A lone
+    # "I" or "Li" is far more likely to be English prose that survived as
+    # its own line, and emitting it would flip locator_type to "printed" on
+    # a book that has no printed folios at all.
+    roman_values = {
+        value for _, _, cands in result
+        for _, value in cands
+        if not standalone_pagenum.match(value)
+    }
+    romans_confirmed = len(roman_values) >= 2
+    if roman_values and not romans_confirmed:
+        log.debug("Discarding %d unconfirmed roman folio capture(s): %r",
+                  len(roman_values), sorted(roman_values))
+
+    finalized = []
+    for page_num, cleaned_text, cands in result:
+        if not romans_confirmed:
+            cands = [c for c in cands if standalone_pagenum.match(c[1])]
         # Key on rank only: min() is stable, so equal ranks resolve to the
         # first candidate encountered. Comparing whole tuples would break
         # ties lexicographically by value ("12" < "47"), which is wrong.
-        folio = (
-            min(folio_candidates, key=lambda c: c[0])[1]
-            if folio_candidates else None
-        )
-        result.append((page_num, '\n'.join(cleaned), folio))
+        folio = min(cands, key=lambda c: c[0])[1] if cands else None
+        finalized.append((page_num, cleaned_text, folio))
 
-    return result
+    return finalized
+
+
+# Real roman-numeral grammar, not a bag of roman letters. The lookahead
+# rejects the empty match that every group-optional alternative allows.
+# This is what separates "xii" (a folio) from "ill" and "civil" (English
+# words that the loose stripping regex also matches).
+_ROMAN_FOLIO_RE = re.compile(
+    r'^(?=[ivxlcdm])m{0,4}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})$',
+    re.I,
+)
+
+
+def _is_roman_folio(folio):
+    """True only for a well-formed roman numeral like "xii".
+
+    The stripping regex is a letter-bag (`[ivxlc]{1,7}`) that also matches
+    English words — "I", "ill", "civil", "Li", "lix". Stripping those was
+    harmless; emitting them as printed page numbers is not, so capture
+    validates against the actual grammar.
+
+    Grammar alone still admits "I" (a legitimate roman 1, and also the
+    English pronoun). That residual ambiguity is resolved separately, by
+    requiring at least two distinct roman captures in the document before
+    any of them counts.
+    """
+    return bool(folio) and bool(_ROMAN_FOLIO_RE.match(folio))
 
 
 def _is_arabic_folio(folio):
@@ -2398,6 +2477,11 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=False):
     )
 
     skipped_toc_pages = 0
+    # Counts pages that actually emitted a locator comment. `cleaned_pages`
+    # is the wrong denominator: blank pages and replaced TOC pages are
+    # `continue`d below and never get a locator, so dividing by it reports
+    # a folio_coverage lower than the real one.
+    emitted_locator_pages = 0
 
     # errors="replace" is a safety net for any surrogate chars that slip
     # through the explicit _strip_surrogates() calls above
@@ -2462,13 +2546,14 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=False):
                 if candidate >= 1:
                     effective_folio = str(candidate)
             f.write(f"<!-- Page sheet={page_num} folio={effective_folio or 'none'} -->\n\n")
+            emitted_locator_pages += 1
             f.write(cleaned)
             f.write("\n\n")
 
     if skipped_toc_pages:
         print(f"  Replaced {skipped_toc_pages} broken TOC page(s) with embedded bookmark TOC")
 
-    report.total_locator_pages = len(cleaned_pages)
+    report.total_locator_pages = emitted_locator_pages
     report.folio_pages = len(folio_by_sheet)
     report.folio_coverage = (
         report.folio_pages / report.total_locator_pages

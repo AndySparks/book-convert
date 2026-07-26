@@ -52,6 +52,7 @@ def build_foliated_pdf(
     pages: int = 8,
     offset: int = -4,
     skip_folios_on: tuple = (),
+    body_only_footer_on: tuple = (),
     name: str = "foliated.pdf",
 ) -> Path:
     """Build a PDF whose pages carry a printed folio in the footer.
@@ -65,16 +66,90 @@ def build_foliated_pdf(
     folio would be >= 1 — standing in for the real-world case where the
     printed number was lost to extraction (OCR miss, figure-covered
     footer). Those sheets are the ones interpolation must fill in.
+
+    `body_only_footer_on` names sheets that carry their printed footer but
+    NO body text — the numbered-but-blank verso of a part divider. After
+    header stripping those pages clean to nothing and are dropped before a
+    locator is emitted, so they must not count toward the folio_coverage
+    denominator.
     """
     out = tmp_path / name
     doc = fitz.open()
     skip = set(skip_folios_on)
+    footer_only = set(body_only_footer_on)
     for i in range(1, pages + 1):
         page = doc.new_page(width=612, height=792)
-        page.insert_text((72, 100), f"Body text for sheet {i}.")
+        if i not in footer_only:
+            page.insert_text((72, 100), f"Body text for sheet {i}.")
         folio = i + offset
         if folio >= 1 and i not in skip:
             page.insert_text((300, 740), str(folio))
+    doc.save(str(out))
+    doc.close()
+    return out
+
+
+def build_trailing_number_pdf(
+    tmp_path: Path,
+    pages: int = 8,
+    name: str = "trailing.pdf",
+) -> Path:
+    """Build a PDF whose body text legitimately ENDS in a number.
+
+    No page carries a printed folio. Every page's last line of prose ends
+    with a year, standing in for the very common real-world shape where a
+    page's closing sentence ends in a number and the real footer never
+    survived extraction. Nothing here was ever printed as a page number, so
+    every sheet must report `folio=none`.
+
+    The closing sentences deliberately DIFFER from page to page. An
+    identical closing line would be detected as a repeating running footer
+    and removed whole, so the trailing-number branch this fixture exists to
+    exercise would never be reached.
+    """
+    prose = [
+        "The study was published in",
+        "The print run sold roughly",
+        "The trial ran for",
+        "The firm employed some",
+        "The division grew to",
+        "The strike lasted about",
+        "The audience reached nearly",
+        "The revision shipped in",
+        "The survey covered exactly",
+        "The programme spanned some",
+        "The refit cost about",
+        "The agency hired around",
+    ]
+    out = tmp_path / name
+    doc = fitz.open()
+    for i in range(1, pages + 1):
+        page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 100), f"Body text for sheet {i}.")
+        page.insert_text(
+            (72, 130), f"{prose[(i - 1) % len(prose)]} {1990 + i}"
+        )
+    doc.save(str(out))
+    doc.close()
+    return out
+
+
+def build_roman_wordlike_pdf(tmp_path: Path, name: str = "romanish.pdf") -> Path:
+    """Build a PDF with standalone lines that LOOK like roman numerals.
+
+    "I", "ill" and "civil" are all matched by the loose roman stripping
+    regex `[ivxlc]{1,7}`, but they are English words sitting on their own
+    line (a dropped caption, a hyphenation artifact, a one-word line). No
+    page here carries a printed number, so the book must come out
+    sheet-only.
+    """
+    out = tmp_path / name
+    doc = fitz.open()
+    words = ["I", "ill", "civil", "ill", "civil", "I", "ill", "civil"]
+    for i in range(1, 9):
+        page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 100), words[(i - 1) % len(words)])
+        page.insert_text((72, 130), f"Body text for sheet {i}.")
     doc.save(str(out))
     doc.close()
     return out

@@ -272,6 +272,208 @@ def test_renumbering_book_gets_no_interpolation_in_markdown(tmp_path):
     assert "<!-- Page sheet=2 folio=none -->" in md
 
 
+# ---------------------------------------------------------------------------
+# A number that merely TRAILS the last line was never printed as a folio.
+# ---------------------------------------------------------------------------
+
+# Each page's closing sentence is DIFFERENT prose that happens to end in a
+# number. Identical closing lines would be caught earlier as a repeating
+# running-footer pattern and removed whole, never reaching the trailing
+# number branch this section exists to pin down.
+TRAILING_PROSE = [
+    "The study was published in",
+    "The print run sold roughly",
+    "The trial ran for",
+    "The firm employed some",
+    "The division grew to",
+    "The strike lasted about",
+    "The audience reached nearly",
+    "The revision shipped in",
+    "The survey covered exactly",
+    "The programme spanned some",
+    "The refit cost about",
+    "The agency hired around",
+]
+
+
+def _trailing_number_page(i):
+    """Body whose last line is prose legitimately ending in a year."""
+    return f"Body text for sheet {i}.\n{TRAILING_PROSE[i - 1]} {1990 + i}"
+
+
+def test_trailing_number_on_last_line_is_not_a_folio():
+    """"...published in 1991" must not become printed page number 1991."""
+    import convert
+    pages = [(i, _trailing_number_page(i)) for i in range(1, 9)]
+    result = convert._strip_running_headers(pages)
+    assert [folio for _, _, folio in result] == [None] * 8
+
+
+def test_trailing_number_is_still_stripped_from_the_body():
+    """Capture goes away; the stripping behavior must not change."""
+    import convert
+    pages = [(i, _trailing_number_page(i)) for i in range(1, 9)]
+    result = convert._strip_running_headers(pages)
+    for i, (_, text, _) in enumerate(result, start=1):
+        # The prose survives; only the trailing number is removed.
+        assert text.rstrip().endswith(TRAILING_PROSE[i - 1])
+        assert str(1990 + i) not in text
+
+
+def test_trailing_number_does_not_poison_the_offset():
+    """A trailing year must not enter _derive_folio_offset at all.
+
+    With sheets 5-12 carrying real printed folios AND every page's prose
+    ending in a year, capturing the year would hand the derivation a set of
+    wildly disagreeing offsets and interpolation would be refused for the
+    whole book.
+    """
+    import convert
+    pages = []
+    for i in range(1, 13):
+        body = _trailing_number_page(i)
+        folio = i - 4
+        if folio >= 1:
+            body += f"\n{folio}"
+        pages.append((i, body))
+
+    result = convert._strip_running_headers(pages)
+    folio_by_sheet = {s: f for s, _, f in result if f}
+    # Only the genuinely printed footers were captured.
+    assert folio_by_sheet == {5: "1", 6: "2", 7: "3", 8: "4", 9: "5",
+                              10: "6", 11: "7", 12: "8"}
+    offset, consistent = convert._derive_folio_offset(folio_by_sheet)
+    assert offset == -4
+    assert consistent is True
+
+
+def test_trailing_number_pdf_emits_no_folios(tmp_path):
+    """End to end: a book with no printed folios must declare sheet-only."""
+    import convert
+    from tests import fixtures
+
+    pdf = fixtures.build_trailing_number_pdf(tmp_path, pages=8)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    report = convert.convert_with_pymupdf(pdf, out_dir)
+    md = (out_dir / f"{pdf.stem}.md").read_text(encoding="utf-8")
+
+    assert report.folio_pages == 0
+    assert report.locator_type == "sheet-only"
+    for sheet in range(1, 9):
+        assert f"<!-- Page sheet={sheet} folio=none -->" in md
+    for year in range(1991, 1999):
+        assert f"folio={year}" not in md
+
+
+# ---------------------------------------------------------------------------
+# The roman path: real numerals only, and never on a single sighting.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("value", [
+    "i", "ii", "iii", "iv", "v", "vi", "ix", "x", "xii", "xl", "lix", "Li",
+    "XVIII", "cx",
+])
+def test_is_roman_folio_accepts_real_numerals(value):
+    import convert
+    assert convert._is_roman_folio(value) is True
+
+
+@pytest.mark.parametrize("value", [
+    "ill", "civil", "vill", "lil", "ivi", "", "iiii", "vv", "ic", "xx1",
+])
+def test_is_roman_folio_rejects_english_words_and_malformed(value):
+    import convert
+    assert convert._is_roman_folio(value) is False
+
+
+def test_english_words_are_never_captured_as_folios():
+    """`ill` and `civil` match the loose stripping regex; neither is a folio."""
+    import convert
+    words = ["I", "ill", "civil", "ill", "civil", "I", "ill", "civil"]
+    pages = [
+        (i, f"{words[i - 1]}\nBody text for sheet {i}.")
+        for i in range(1, 9)
+    ]
+    result = convert._strip_running_headers(pages)
+    assert [folio for _, _, folio in result] == [None] * 8
+
+
+def test_english_words_are_still_stripped_from_the_body():
+    """Capture narrows; stripping stays exactly as it was."""
+    import convert
+    words = ["I", "ill", "civil", "ill", "civil", "I", "ill", "civil"]
+    pages = [
+        (i, f"{words[i - 1]}\nBody text for sheet {i}.")
+        for i in range(1, 9)
+    ]
+    result = convert._strip_running_headers(pages)
+    for i, (_, text, _) in enumerate(result, start=1):
+        assert text.strip() == f"Body text for sheet {i}."
+
+
+def test_a_single_roman_capture_is_not_believed():
+    """One standalone `I` is the English pronoun far more often than page 1."""
+    import convert
+    pages = [(i, f"Body text for sheet {i}.") for i in range(1, 9)]
+    pages[2] = (3, "I\nBody text for sheet 3.")
+    result = convert._strip_running_headers(pages)
+    assert [folio for _, _, folio in result] == [None] * 8
+
+
+def test_two_distinct_roman_captures_are_believed():
+    """A genuine front-matter run corroborates itself."""
+    import convert
+    romans = ["i", "ii", "iii", "iv", "v", "vi"]
+    pages = [(i + 1, f"Front matter {i}.\n{r}") for i, r in enumerate(romans)]
+    result = convert._strip_running_headers(pages)
+    assert [f for _, _, f in result] == romans
+
+
+def test_wordlike_romans_do_not_flip_locator_type(tmp_path):
+    """A book with zero printed folios must not declare `printed`."""
+    import convert
+    from tests import fixtures
+
+    pdf = fixtures.build_roman_wordlike_pdf(tmp_path)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    report = convert.convert_with_pymupdf(pdf, out_dir)
+
+    assert report.folio_pages == 0
+    assert report.locator_type == "sheet-only"
+
+
+def test_total_locator_pages_counts_only_emitted_locators(tmp_path):
+    """The coverage denominator must not include pages that were skipped.
+
+    Sheets 6 and 10 are numbered-but-blank part-divider versos: they carry
+    a printed footer and nothing else, so they clean to empty and are
+    dropped before any locator is written. Counting them inflates the
+    denominator and under-reports folio_coverage.
+    """
+    import convert
+    from tests import fixtures
+
+    pdf = fixtures.build_foliated_pdf(
+        tmp_path, pages=12, offset=-4, body_only_footer_on=(6, 10)
+    )
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    report = convert.convert_with_pymupdf(pdf, out_dir)
+    md = (out_dir / f"{pdf.stem}.md").read_text(encoding="utf-8")
+
+    emitted = md.count("<!-- Page sheet=")
+    # The two footer-only sheets produced no locator at all.
+    assert emitted == 10
+    assert "<!-- Page sheet=6 " not in md
+    assert "<!-- Page sheet=10 " not in md
+    assert report.total_locator_pages == emitted
+    assert report.folio_coverage == pytest.approx(
+        report.folio_pages / emitted
+    )
+
+
 LOCATOR_TYPES = {"printed", "sheet-only", "none"}
 
 

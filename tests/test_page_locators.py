@@ -469,9 +469,45 @@ def test_total_locator_pages_counts_only_emitted_locators(tmp_path):
     assert "<!-- Page sheet=6 " not in md
     assert "<!-- Page sheet=10 " not in md
     assert report.total_locator_pages == emitted
-    assert report.folio_coverage == pytest.approx(
-        report.folio_pages / emitted
+    # Both terms are counted over the SAME population. Sheets 5-12 all
+    # carried a printed footer, but 6 and 10 never emitted a locator, so
+    # the numerator is 6 -- not the 8 folios that were captured.
+    assert report.folio_pages == 6
+    assert report.folio_coverage == pytest.approx(6 / 10)
+    assert report.folio_coverage <= 1.0
+
+
+def test_folio_coverage_never_exceeds_one(tmp_path):
+    """The ratio is a coverage fraction; >1.0 is meaningless by construction.
+
+    Worth asserting outright because a >1.0 value is not merely wrong, it is
+    wrong in the unsafe direction: it sails through the ingestion gate's
+    `>= threshold` check while describing nothing real.
+
+    Every sheet that carries a printed folio here is also body-less, so it
+    is dropped before a locator is written. A numerator counted over
+    captured folios (8) against a denominator counted over emitted
+    locators (4) yields 2.0.
+    """
+    import convert
+    from tests import fixtures
+
+    pdf = fixtures.build_foliated_pdf(
+        tmp_path, pages=12, offset=-4,
+        body_only_footer_on=tuple(range(5, 13)),
     )
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    report = convert.convert_with_pymupdf(pdf, out_dir)
+    md = (out_dir / f"{pdf.stem}.md").read_text(encoding="utf-8")
+
+    assert report.total_locator_pages == md.count("<!-- Page sheet=") == 4
+    assert report.folio_pages == 0
+    assert report.folio_coverage == 0.0
+    assert 0.0 <= report.folio_coverage <= 1.0
+    # A book whose every captured folio was dropped has no citable printed
+    # address left, and must not claim otherwise.
+    assert report.locator_type == "sheet-only"
 
 
 LOCATOR_TYPES = {"printed", "sheet-only", "none"}

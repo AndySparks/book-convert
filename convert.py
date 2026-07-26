@@ -2477,11 +2477,18 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=False):
     )
 
     skipped_toc_pages = 0
-    # Counts pages that actually emitted a locator comment. `cleaned_pages`
-    # is the wrong denominator: blank pages and replaced TOC pages are
-    # `continue`d below and never get a locator, so dividing by it reports
-    # a folio_coverage lower than the real one.
+    # folio_coverage's two terms MUST be counted over the same population:
+    # pages that actually emitted a locator. Blank-after-clean pages and
+    # replaced broken-TOC pages are `continue`d below and never get one.
+    #
+    # Counting the denominator over `cleaned_pages` understates coverage.
+    # Counting the numerator over `folio_by_sheet` (which includes skipped
+    # pages) while the denominator excludes them is worse: the ratio can
+    # exceed 1.0, and a nonsensical >1.0 value sails straight through the
+    # ingestion gate's `>= threshold` check. Both are counted here, in the
+    # emit loop, so they cannot drift apart again.
     emitted_locator_pages = 0
+    emitted_folio_pages = 0
 
     # errors="replace" is a safety net for any surrogate chars that slip
     # through the explicit _strip_surrogates() calls above
@@ -2547,6 +2554,10 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=False):
                     effective_folio = str(candidate)
             f.write(f"<!-- Page sheet={page_num} folio={effective_folio or 'none'} -->\n\n")
             emitted_locator_pages += 1
+            # `folio`, not `effective_folio`: folio_pages counts CAPTURED
+            # printed numbers, never interpolated ones.
+            if folio:
+                emitted_folio_pages += 1
             f.write(cleaned)
             f.write("\n\n")
 
@@ -2554,7 +2565,7 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=False):
         print(f"  Replaced {skipped_toc_pages} broken TOC page(s) with embedded bookmark TOC")
 
     report.total_locator_pages = emitted_locator_pages
-    report.folio_pages = len(folio_by_sheet)
+    report.folio_pages = emitted_folio_pages
     report.folio_coverage = (
         report.folio_pages / report.total_locator_pages
         if report.total_locator_pages else 0.0

@@ -649,18 +649,20 @@ def _strip_running_headers(pages_text):
         pages_text: list of (page_num, raw_text) tuples
 
     Returns:
-        list of (page_num, cleaned_text, folio) tuples, where folio is the
-        printed page number captured from the running header/footer as a
-        string ("47", "xii"), or None when the page carries none.
+        list of (page_num, cleaned_text, page_printed) tuples, where
+        page_printed is the printed page number captured from the running
+        header/footer as a string ("47", "xii"), or None when the page
+        carries none.
 
     Stripping and capture are deliberately separate concerns. What gets
-    removed from the body text is unchanged from the pre-folio behavior;
-    what we are willing to *believe* is a printed page number is a strictly
-    narrower set. A folio we emit is presented to a reader as the number
-    printed on that page, so a wrong one is worse than none at all.
+    removed from the body text is unchanged from the pre-page_printed
+    behavior; what we are willing to *believe* is a printed page number is
+    a strictly narrower set. A page_printed value we emit is presented to
+    a reader as the number printed on that page, so a wrong one is worse
+    than none at all.
 
-    Folio candidates are collected as (rank, value) and the lowest rank
-    wins:
+    Page-printed candidates are collected as (rank, value) and the lowest
+    rank wins:
 
         rank 0 — a standalone number on its own line near the page bottom
         rank 1 — a standalone number on its own line near the page top
@@ -752,8 +754,9 @@ def _strip_running_headers(pages_text):
     # NOTE: this is the STRIPPING test only, and it is intentionally loose
     # (a bag of roman letters). Loosening or tightening it changes what
     # disappears from the body text across every already-converted book.
-    # Whether a stripped line is believed to BE a folio is decided
-    # separately, by _is_roman_folio + the two-sample confirmation below.
+    # Whether a stripped line is believed to BE a printed page number is
+    # decided separately, by _is_roman_page_number + the two-sample
+    # confirmation below.
     roman_pagenum = re.compile(
         r'^\s*[ivxlc]{1,7}\s*$', re.I
     )
@@ -762,7 +765,7 @@ def _strip_running_headers(pages_text):
     for page_num, text in pages_text:
         lines = text.split('\n')
         cleaned = []
-        folio_candidates = []   # (rank, value)
+        page_printed_candidates = []   # (rank, value)
         for j, line in enumerate(lines):
             stripped = line.strip()
             if not stripped:
@@ -803,8 +806,8 @@ def _strip_running_headers(pages_text):
                         break
 
             # Capture-then-strip standalone page numbers (arabic or roman).
-            # This is the printed folio — the only address that is valid for
-            # citation. It used to be discarded here.
+            # This is the printed page number — the only address that is
+            # valid for citation. It used to be discarded here.
             #
             # The strip condition is unchanged. The capture condition is
             # narrower: an arabic run is taken at face value, but a roman
@@ -814,9 +817,9 @@ def _strip_running_headers(pages_text):
                 standalone_pagenum.match(stripped) or roman_pagenum.match(stripped)
             ):
                 if standalone_pagenum.match(stripped):
-                    folio_candidates.append((0 if is_near_bottom else 1, stripped))
-                elif _is_roman_folio(stripped.strip()):
-                    folio_candidates.append((0 if is_near_bottom else 1, stripped))
+                    page_printed_candidates.append((0 if is_near_bottom else 1, stripped))
+                elif _is_roman_page_number(stripped.strip()):
+                    page_printed_candidates.append((0 if is_near_bottom else 1, stripped))
                 continue
 
             # Strip "CHAPTER TITLE | page" or "page | BOOK TITLE" running headers
@@ -829,24 +832,25 @@ def _strip_running_headers(pages_text):
 
             # Strip a trailing page number appended to the last line. This
             # is a stripping rule ONLY — see the docstring. The number is
-            # NOT a folio candidate: the last line of a page legitimately
-            # ends in a number often enough ("...published in 1999") that
-            # capturing here publishes numbers that were never printed,
-            # poisons the offset derivation, and inflates folio_pages.
+            # NOT a page_printed candidate: the last line of a page
+            # legitimately ends in a number often enough ("...published in
+            # 1999") that capturing here publishes numbers that were never
+            # printed, poisons the offset derivation, and inflates
+            # page_printed_count.
             if is_last:
                 m_trail = re.search(r'\s+(\d{1,4})\s*$', line)
                 if m_trail:
                     line = line[:m_trail.start()]
 
             cleaned.append(line)
-        result.append((page_num, '\n'.join(cleaned), folio_candidates))
+        result.append((page_num, '\n'.join(cleaned), page_printed_candidates))
 
-    # Roman folios need corroboration. Real front matter runs several
+    # Roman page numbers need corroboration. Real front matter runs several
     # numbered pages, so >= 2 distinct roman captures across the document
     # is cheap evidence that we are looking at a numbering sequence. A lone
     # "I" or "Li" is far more likely to be English prose that survived as
-    # its own line, and emitting it would flip locator_type to "printed" on
-    # a book that has no printed folios at all.
+    # its own line, and emitting it would flip page_numbering to "printed"
+    # on a book that has no printed page numbers at all.
     roman_values = {
         value for _, _, cands in result
         for _, value in cands
@@ -854,7 +858,7 @@ def _strip_running_headers(pages_text):
     }
     romans_confirmed = len(roman_values) >= 2
     if roman_values and not romans_confirmed:
-        log.debug("Discarding %d unconfirmed roman folio capture(s): %r",
+        log.debug("Discarding %d unconfirmed roman page-number capture(s): %r",
                   len(roman_values), sorted(roman_values))
 
     finalized = []
@@ -864,23 +868,23 @@ def _strip_running_headers(pages_text):
         # Key on rank only: min() is stable, so equal ranks resolve to the
         # first candidate encountered. Comparing whole tuples would break
         # ties lexicographically by value ("12" < "47"), which is wrong.
-        folio = min(cands, key=lambda c: c[0])[1] if cands else None
-        finalized.append((page_num, cleaned_text, folio))
+        page_printed = min(cands, key=lambda c: c[0])[1] if cands else None
+        finalized.append((page_num, cleaned_text, page_printed))
 
     return finalized
 
 
 # Real roman-numeral grammar, not a bag of roman letters. The lookahead
 # rejects the empty match that every group-optional alternative allows.
-# This is what separates "xii" (a folio) from "ill" and "civil" (English
-# words that the loose stripping regex also matches).
-_ROMAN_FOLIO_RE = re.compile(
+# This is what separates "xii" (a printed page number) from "ill" and
+# "civil" (English words that the loose stripping regex also matches).
+_ROMAN_PAGE_NUMBER_RE = re.compile(
     r'^(?=[ivxlcdm])m{0,4}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})$',
     re.I,
 )
 
 
-def _is_roman_folio(folio):
+def _is_roman_page_number(page_printed):
     """True only for a well-formed roman numeral like "xii".
 
     The stripping regex is a letter-bag (`[ivxlc]{1,7}`) that also matches
@@ -893,57 +897,59 @@ def _is_roman_folio(folio):
     requiring at least two distinct roman captures in the document before
     any of them counts.
     """
-    return bool(folio) and bool(_ROMAN_FOLIO_RE.match(folio))
+    return bool(page_printed) and bool(_ROMAN_PAGE_NUMBER_RE.match(page_printed))
 
 
-def _is_arabic_folio(folio):
-    """True only for a plain ASCII decimal folio like "47".
+def _is_arabic_page_number(page_printed):
+    """True only for a plain ASCII decimal page number like "47".
 
     `str.isdigit()` is too permissive: it accepts superscripts ("²", a
-    footnote marker that can reach folio_candidates) where `int()` then
-    raises ValueError and aborts the whole conversion, and it accepts
+    footnote marker that can reach page_printed_candidates) where `int()`
+    then raises ValueError and aborts the whole conversion, and it accepts
     Arabic-Indic digits, which are not a numbering sequence we can safely
     interpolate against. `.isascii() and .isdecimal()` admits exactly the
     characters `int()` will accept as a base-10 page number.
     """
-    return bool(folio) and folio.isascii() and folio.isdecimal()
+    return bool(page_printed) and page_printed.isascii() and page_printed.isdecimal()
 
 
-def _arabic_folio_sheets(folio_by_sheet):
-    """Sheets carrying an arabic captured folio — the interpolation window.
+def _arabic_page_pdf_indices(page_printed_by_pdf_index):
+    """PDF page indices carrying an arabic captured page number — the
+    interpolation window.
 
     Interpolation is permitted only BETWEEN captured samples, so the caller
-    clamps to the closed interval [min, max] of these sheets. Roman samples
-    are excluded here for the same reason they are excluded from offset
-    derivation: they belong to a separate numbering sequence and must not
-    widen the arabic window.
+    clamps to the closed interval [min, max] of these PDF page indices.
+    Roman samples are excluded here for the same reason they are excluded
+    from offset derivation: they belong to a separate numbering sequence
+    and must not widen the arabic window.
     """
     return [
-        sheet for sheet, folio in folio_by_sheet.items()
-        if _is_arabic_folio(folio)
+        page_pdf for page_pdf, page_printed in page_printed_by_pdf_index.items()
+        if _is_arabic_page_number(page_printed)
     ]
 
 
-def _derive_folio_offset(folio_by_sheet):
-    """Derive a constant sheet->folio offset from captured samples.
+def _derive_page_offset(page_printed_by_pdf_index):
+    """Derive a constant page_pdf->page_printed offset from captured samples.
 
-    Returns (offset, is_consistent). `offset` is folio - sheet. Consistency
-    requires at least 3 arabic samples that all agree; a book that renumbers
-    partway through (part-openers restarting at 1, roman-to-arabic front
-    matter) will disagree, and we refuse to interpolate rather than invent
-    page numbers. Roman folios never participate — they belong to a
-    separate numbering sequence.
+    Returns (offset, is_consistent). `offset` is page_printed - page_pdf.
+    Consistency requires at least 3 arabic samples that all agree; a book
+    that renumbers partway through (part-openers restarting at 1,
+    roman-to-arabic front matter) will disagree, and we refuse to
+    interpolate rather than invent page numbers. Roman page numbers never
+    participate — they belong to a separate numbering sequence.
 
     Args:
-        folio_by_sheet: dict of sheet index -> folio string
+        page_printed_by_pdf_index: dict of PDF page index -> printed page
+            number string
 
     Returns:
         (int | None, bool)
     """
     offsets = [
-        int(folio) - sheet
-        for sheet, folio in folio_by_sheet.items()
-        if _is_arabic_folio(folio)
+        int(page_printed) - page_pdf
+        for page_pdf, page_printed in page_printed_by_pdf_index.items()
+        if _is_arabic_page_number(page_printed)
     ]
     if len(offsets) < 3:
         return (None, False)
@@ -953,27 +959,27 @@ def _derive_folio_offset(folio_by_sheet):
 
 
 # What kind of page address each backend can produce. `pymupdf` is absent
-# because it decides at runtime (printed when folios were captured,
-# sheet-only otherwise) — see convert_with_pymupdf.
-BACKEND_LOCATOR_TYPE = {
-    "ocr": "sheet-only",
-    "pymupdf4llm": "sheet-only",
+# because it decides at runtime (printed when printed page numbers were
+# captured, pdf_only otherwise) — see convert_with_pymupdf.
+BACKEND_PAGE_NUMBERING = {
+    "ocr": "pdf_only",
+    "pymupdf4llm": "pdf_only",
     "marker": "none",
     "pandoc": "none",
     "docling": "none",
 }
 
 
-def _apply_backend_locator_type(report):
+def _apply_backend_page_numbering(report):
     """Stamp a backend's fixed locator capability onto its report.
 
     Backends that cannot produce a printed page number must declare it, so
     the ingestion gate can route away from them instead of silently filing
     a source that can never be cited by page.
     """
-    fixed = BACKEND_LOCATOR_TYPE.get(report.method)
+    fixed = BACKEND_PAGE_NUMBERING.get(report.method)
     if fixed:
-        report.locator_type = fixed
+        report.page_numbering = fixed
     return report
 
 
@@ -2462,33 +2468,37 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=False):
     doc.close()
 
     # Strip running headers/footers across all pages, capturing the printed
-    # folio (the only citation-valid address) as we go.
+    # page number (the only citation-valid address) as we go.
     cleaned_pages = _strip_running_headers(raw_pages)
-    folio_by_sheet = {sheet: folio for sheet, _, folio in cleaned_pages if folio}
-    folio_offset, folio_consistent = _derive_folio_offset(folio_by_sheet)
+    page_printed_by_pdf_index = {
+        page_pdf: page_printed
+        for page_pdf, _, page_printed in cleaned_pages if page_printed
+    }
+    page_printed_offset, page_printed_offset_consistent = _derive_page_offset(page_printed_by_pdf_index)
     # Interpolation is permitted only BETWEEN captured samples. Outside that
     # span there is no evidence the offset still holds — endnotes or a second
     # numbering sequence past the last sample contribute no samples, so they
     # cannot disagree, and extrapolating there invents confident wrong page
     # numbers a reader cannot detect.
-    _arabic_sheets = _arabic_folio_sheets(folio_by_sheet)
-    folio_span = (
-        (min(_arabic_sheets), max(_arabic_sheets)) if _arabic_sheets else None
+    arabic_page_pdf_indices = _arabic_page_pdf_indices(page_printed_by_pdf_index)
+    page_pdf_span = (
+        (min(arabic_page_pdf_indices), max(arabic_page_pdf_indices)) if arabic_page_pdf_indices else None
     )
 
     skipped_toc_pages = 0
-    # folio_coverage's two terms MUST be counted over the same population:
-    # pages that actually emitted a locator. Blank-after-clean pages and
-    # replaced broken-TOC pages are `continue`d below and never get one.
+    # page_printed_coverage's two terms MUST be counted over the same
+    # population: pages that actually emitted a locator. Blank-after-clean
+    # pages and replaced broken-TOC pages are `continue`d below and never
+    # get one.
     #
     # Counting the denominator over `cleaned_pages` understates coverage.
-    # Counting the numerator over `folio_by_sheet` (which includes skipped
-    # pages) while the denominator excludes them is worse: the ratio can
-    # exceed 1.0, and a nonsensical >1.0 value sails straight through the
-    # ingestion gate's `>= threshold` check. Both are counted here, in the
-    # emit loop, so they cannot drift apart again.
+    # Counting the numerator over `page_printed_by_pdf_index` (which
+    # includes skipped pages) while the denominator excludes them is
+    # worse: the ratio can exceed 1.0, and a nonsensical >1.0 value sails
+    # straight through the ingestion gate's `>= threshold` check. Both are
+    # counted here, in the emit loop, so they cannot drift apart again.
     emitted_locator_pages = 0
-    emitted_folio_pages = 0
+    emitted_page_printed_pages = 0
 
     # errors="replace" is a safety net for any surrogate chars that slip
     # through the explicit _strip_surrogates() calls above
@@ -2515,7 +2525,7 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=False):
         # content the user needs for keyword lookup.
         toc_skip_cutoff = max(20, total_pages // 10)
 
-        for page_num, text, folio in cleaned_pages:
+        for page_num, text, page_printed in cleaned_pages:
             # Detect index/glossary-style list pages so we can preserve
             # newlines instead of collapsing every entry into one paragraph.
             # Skip this in the front matter so _format_toc + broken-TOC
@@ -2543,36 +2553,37 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=False):
                 skipped_toc_pages += 1
                 log.debug("Skipping broken TOC page %d", page_num)
                 continue
-            effective_folio = folio
-            if (effective_folio is None
-                    and folio_consistent
-                    and folio_span is not None
-                    and folio_span[0] <= page_num <= folio_span[1]):
-                candidate = page_num + folio_offset
-                # Never invent a folio for pages that precede printed page 1.
+            effective_page_printed = page_printed
+            if (effective_page_printed is None
+                    and page_printed_offset_consistent
+                    and page_pdf_span is not None
+                    and page_pdf_span[0] <= page_num <= page_pdf_span[1]):
+                candidate = page_num + page_printed_offset
+                # Never invent a printed page number for pages that precede
+                # printed page 1.
                 if candidate >= 1:
-                    effective_folio = str(candidate)
-            f.write(f"<!-- Page sheet={page_num} folio={effective_folio or 'none'} -->\n\n")
+                    effective_page_printed = str(candidate)
+            f.write(f"<!-- page_pdf={page_num} page_printed={effective_page_printed or 'none'} -->\n\n")
             emitted_locator_pages += 1
-            # `folio`, not `effective_folio`: folio_pages counts CAPTURED
-            # printed numbers, never interpolated ones.
-            if folio:
-                emitted_folio_pages += 1
+            # `page_printed`, not `effective_page_printed`: page_printed_count
+            # counts CAPTURED printed numbers, never interpolated ones.
+            if page_printed:
+                emitted_page_printed_pages += 1
             f.write(cleaned)
             f.write("\n\n")
 
     if skipped_toc_pages:
         print(f"  Replaced {skipped_toc_pages} broken TOC page(s) with embedded bookmark TOC")
 
-    report.total_locator_pages = emitted_locator_pages
-    report.folio_pages = emitted_folio_pages
-    report.folio_coverage = (
-        report.folio_pages / report.total_locator_pages
-        if report.total_locator_pages else 0.0
+    report.page_locator_count = emitted_locator_pages
+    report.page_printed_count = emitted_page_printed_pages
+    report.page_printed_coverage = (
+        report.page_printed_count / report.page_locator_count
+        if report.page_locator_count else 0.0
     )
-    report.locator_type = "printed" if report.folio_pages else "sheet-only"
-    report.folio_offset = folio_offset
-    report.folio_offset_consistent = folio_consistent
+    report.page_numbering = "printed" if report.page_printed_count else "pdf_only"
+    report.page_printed_offset = page_printed_offset
+    report.page_printed_offset_consistent = page_printed_offset_consistent
 
     # Check if we got enough text to consider this a real conversion
     if total_pages > 0 and (pages_with_text / total_pages) < MIN_TEXT_RATIO:
@@ -2743,7 +2754,7 @@ def convert_with_marker(pdf_path, output_dir, marker_args=None):
             f"  tables: {report.tables_emitted} emitted / "
             f"{report.table_captions_seen} captions seen"
         )
-        _apply_backend_locator_type(report)
+        _apply_backend_page_numbering(report)
         report_path = target.with_suffix(".report.json")
         write_report(report_path, report)
         return report
@@ -2791,7 +2802,7 @@ def convert_with_ocr(pdf_path, output_dir):
                 text = pytesseract.image_to_string(images[0])
                 if text.strip():
                     pages_with_text += 1
-                    f.write(f"<!-- Page sheet={i} folio=none -->\n\n")
+                    f.write(f"<!-- page_pdf={i} page_printed=none -->\n\n")
                     cleaned = clean_text(text.strip())
                     cleaned = _format_headings(cleaned)
                     cleaned = _format_toc(cleaned)
@@ -2811,7 +2822,7 @@ def convert_with_ocr(pdf_path, output_dir):
     # it makes the OCR backend's table blindness visible in the sidecar
     # instead of leaving it to be discovered during a scholarly pass.
     apply_table_signals(report, output_file)
-    _apply_backend_locator_type(report)
+    _apply_backend_page_numbering(report)
     report_path = output_file.with_suffix(".report.json")
     write_report(report_path, report)
     return report
@@ -2869,7 +2880,7 @@ def convert_with_pandoc(book_path, output_dir):
     Images are referenced but not extracted (BookConvert is a text-only
     pipeline; pulling images would inflate output and break offline use).
     Returns a ConversionReport and writes the sidecar, like every other
-    backend; its `locator_type` is always "none" because an epub is
+    backend; its `page_numbering` is always "none" because an epub is
     reflowable and has no pages to address.
     Raises ConversionError on failure.
     """
@@ -2930,7 +2941,7 @@ def convert_with_pandoc(book_path, output_dir):
 
     # EPUB is reflowable: it has no pages, so no locator of any kind is
     # recoverable. That is exactly the case the ingestion gate most needs to
-    # detect, so pandoc writes a sidecar declaring `locator_type: "none"`
+    # detect, so pandoc writes a sidecar declaring `page_numbering: "none"`
     # rather than writing nothing — silence is indistinguishable from a
     # conversion that never ran. Page counts stay at their defaults; a
     # fabricated `total_pages` would be its own small lie.
@@ -2939,7 +2950,7 @@ def convert_with_pandoc(book_path, output_dir):
         output=str(output_file),
         method="pandoc",
     )
-    _apply_backend_locator_type(report)
+    _apply_backend_page_numbering(report)
     write_report(output_file.with_suffix(".report.json"), report)
     return report
 
@@ -2968,8 +2979,8 @@ def convert_with_pymupdf4llm(pdf_path, output_dir):
     # pymupdf4llm returns the full markdown as a string by default, OR
     # a list of per-page dicts when page_chunks=True. We use page_chunks
     # so we can emit page markers between chunks. Markers use the shared
-    # sheet/folio locator format; pymupdf4llm returns pre-cleaned text, so
-    # no printed folio is recoverable here.
+    # page_pdf/page_printed locator format; pymupdf4llm returns pre-cleaned
+    # text, so no printed page number is recoverable here.
     # pymupdf4llm sanitizes spaces in image_path to underscores when it
     # writes the PNGs, so we must sanitize the directory name ourselves
     # before mkdir — otherwise we'd create "Stem With Spaces_images/" and
@@ -2986,7 +2997,7 @@ def convert_with_pymupdf4llm(pdf_path, output_dir):
         page_chunks=True,
     )
 
-    # Stitch chunks with `<!-- Page sheet={N} folio=none -->` markers between
+    # Stitch chunks with `<!-- page_pdf={N} page_printed=none -->` markers between
     # them. pymupdf4llm's metadata.page_number is already 1-indexed (matches the
     # pymupdf backend's convention at line ~2280 above). Use it directly;
     # fall back to a 1-based enumeration if the key is missing for some
@@ -2995,7 +3006,7 @@ def convert_with_pymupdf4llm(pdf_path, output_dir):
     for idx, chunk in enumerate(page_chunks, start=1):
         page_num = chunk.get("metadata", {}).get("page_number", idx)
         chunk_text = chunk.get("text", "")
-        body_parts.append(f"<!-- Page sheet={page_num} folio=none -->\n\n{chunk_text}")
+        body_parts.append(f"<!-- page_pdf={page_num} page_printed=none -->\n\n{chunk_text}")
     markdown = "\n\n".join(body_parts)
 
     # pymupdf4llm embeds the full `image_path` we passed as the literal ref
@@ -3033,7 +3044,7 @@ def convert_with_pymupdf4llm(pdf_path, output_dir):
         pages_with_text=total_pages,  # pymupdf4llm handles its own detection
         extracted_assets=extracted_assets,
     )
-    _apply_backend_locator_type(report)
+    _apply_backend_page_numbering(report)
     write_report(output_file.with_suffix(".report.json"), report)
     return report
 
@@ -3077,7 +3088,7 @@ def convert_with_docling(pdf_path, output_dir):
         total_pages=total_pages,
         pages_with_text=total_pages,
     )
-    _apply_backend_locator_type(report)
+    _apply_backend_page_numbering(report)
     write_report(output_file.with_suffix(".report.json"), report)
     return report
 

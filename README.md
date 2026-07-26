@@ -96,42 +96,45 @@ the body text at the right page position.
 
 Every locator-emitting backend writes one comment per page:
 
-    <!-- Page sheet=59 folio=47 -->
-    <!-- Page sheet=3 folio=none -->
+    <!-- page_pdf=59 page_printed=47 -->
+    <!-- page_pdf=3 page_printed=none -->
 
-`sheet` is the 1-based index of the page inside the PDF file. It is always
-accurate, and is sparse — pages with no extractable text are omitted.
+`page_pdf` is the 1-based index of the page inside the PDF file. It is
+always accurate, and is sparse — pages with no extractable text are
+omitted.
 
-`folio` is the page number **printed on the page**. It is the only address
-valid for scholarly citation. It is `none` when the source carries no
-printed page number, which is normal for ebook-derived PDFs and universal
-for EPUB.
+`page_printed` is the page number **printed on the page**. It is the only
+address valid for scholarly citation. It is `none` when the source carries
+no printed page number, which is normal for ebook-derived PDFs and
+universal for EPUB.
 
-Never present a `sheet` value as a page number. The sidecar declares which
-you have:
+Never present a `page_pdf` value as a page number. The sidecar declares
+which you have:
 
-| `locator_type` | Meaning | Backends |
+| `page_numbering` | Meaning | Backends |
 |---|---|---|
-| `printed` | Real page numbers were captured | `pymupdf`, when folios were actually found |
-| `sheet-only` | PDF sheet index only | `pymupdf` (no folios found), `pymupdf4llm`, `ocr` |
+| `printed` | Real page numbers were captured | `pymupdf`, when printed page numbers were actually found |
+| `pdf_only` | PDF page index only | `pymupdf` (no printed page numbers found), `pymupdf4llm`, `ocr` |
 | `none` | No locators emitted at all | `marker`, `pandoc` (EPUB), `docling` |
 
 `pymupdf` is the only backend that can produce a citable page number, and it
-decides between `printed` and `sheet-only` at runtime. The other five have a
-fixed capability. Read `locator_type` from the sidecar rather than assuming it
-from the `--method` you asked for.
+decides between `printed` and `pdf_only` at runtime. The other five have a
+fixed capability. Read `page_numbering` from the sidecar rather than
+assuming it from the `--method` you asked for.
 
-Where folio survival is sparse, `folio_offset` is derived from the captured
-samples and used to fill the gaps — but only when at least 3 arabic samples
-all agree (`folio_offset_consistent: true`), and only for sheets that fall
+Where printed-page-number survival is sparse, `page_printed_offset` is
+derived from the captured samples and used to fill the gaps — but only
+when at least 3 arabic samples all agree
+(`page_printed_offset_consistent: true`), and only for PDF pages that fall
 between the first and last captured sample. A book that renumbers partway
-through, or that has printed folios only in part of the text, gets no
+through, or that has printed page numbers only in part of the text, gets no
 interpolation (or interpolation clamped to that span) rather than invented
-page numbers — and interpolation never produces a folio below 1.
+page numbers — and interpolation never produces a printed page number
+below 1.
 
 Check coverage after any conversion:
 
-    jq '.locator_type, .folio_coverage, .folio_offset_consistent' output/<Title>.report.json
+    jq '.page_numbering, .page_printed_coverage, .page_printed_offset_consistent' output/<Title>.report.json
 
 ### Post-conversion cleanup (on by default)
 

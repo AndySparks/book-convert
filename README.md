@@ -92,6 +92,42 @@ diagrams, and embedded raster images as PNGs in a sibling directory
 (`output/<stem>_assets/`) and inserts markdown image references into
 the body text at the right page position.
 
+### Page locators
+
+Every locator-emitting backend writes one comment per page:
+
+    <!-- Page sheet=59 folio=47 -->
+    <!-- Page sheet=3 folio=none -->
+
+`sheet` is the 1-based index of the page inside the PDF file. It is always
+accurate, and is sparse — pages with no extractable text are omitted.
+
+`folio` is the page number **printed on the page**. It is the only address
+valid for scholarly citation. It is `none` when the source carries no
+printed page number, which is normal for ebook-derived PDFs and universal
+for EPUB.
+
+Never present a `sheet` value as a page number. The sidecar declares which
+you have:
+
+| `locator_type` | Meaning |
+|---|---|
+| `printed` | Real page numbers were captured |
+| `sheet-only` | PDF sheet index only |
+| `none` | No locators emitted at all |
+
+Where folio survival is sparse, `folio_offset` is derived from the captured
+samples and used to fill the gaps — but only when at least 3 arabic samples
+all agree (`folio_offset_consistent: true`), and only for sheets that fall
+between the first and last captured sample. A book that renumbers partway
+through, or that has printed folios only in part of the text, gets no
+interpolation (or interpolation clamped to that span) rather than invented
+page numbers — and interpolation never produces a folio below 1.
+
+Check coverage after any conversion:
+
+    jq '.locator_type, .folio_coverage, .folio_offset_consistent' output/<Title>.report.json
+
 ### Post-conversion cleanup (on by default)
 
 Every conversion runs a verbatim-safe cleanup pass over the emitted

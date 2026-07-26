@@ -72,3 +72,52 @@ def test_short_document_early_return_still_three_tuples():
     result = convert._strip_running_headers(pages)
     assert all(len(t) == 3 for t in result)
     assert all(folio is None for _, _, folio in result)
+
+
+def test_pymupdf_emits_two_field_locator(tmp_path):
+    import convert
+    from tests import fixtures
+
+    pdf = fixtures.build_foliated_pdf(tmp_path, pages=8, offset=-4)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    report = convert.convert_with_pymupdf(pdf, out_dir)
+    md = (out_dir / f"{pdf.stem}.md").read_text(encoding="utf-8")
+
+    # Sheet 5 carries printed folio 1.
+    assert "<!-- Page sheet=5 folio=1 -->" in md
+    assert "<!-- Page sheet=8 folio=4 -->" in md
+    # Sheets 1-4 have no printed folio.
+    assert "<!-- Page sheet=1 folio=none -->" in md
+    # The old single-field format must be gone.
+    assert "<!-- Page 5 -->" not in md
+
+
+def test_pymupdf_reports_folio_coverage(tmp_path):
+    import convert
+    from tests import fixtures
+
+    pdf = fixtures.build_foliated_pdf(tmp_path, pages=8, offset=-4)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    report = convert.convert_with_pymupdf(pdf, out_dir)
+    assert report.total_locator_pages == 8
+    assert report.folio_pages == 4          # sheets 5,6,7,8
+    assert report.folio_coverage == pytest.approx(0.5)
+    assert report.locator_type == "printed"
+
+
+def test_pymupdf_declares_sheet_only_when_no_folios(tmp_path):
+    """An ebook-derived PDF has no printed folio; it must say so."""
+    import convert
+    from tests import fixtures
+
+    pdf = fixtures.build_text_pdf(tmp_path, pages=6, body="No folio here.")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    report = convert.convert_with_pymupdf(pdf, out_dir)
+    assert report.folio_pages == 0
+    assert report.locator_type == "sheet-only"

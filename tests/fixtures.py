@@ -46,6 +46,27 @@ def build_figure_pdf(tmp_path: Path) -> Path:
     return out
 
 
+def build_foliated_pdf(tmp_path: Path, pages: int = 8, offset: int = -4) -> Path:
+    """Build a PDF whose pages carry a printed folio in the footer.
+
+    Sheet i (1-based) prints folio i + offset. With the default offset of
+    -4, sheet 5 prints "1" — i.e. four pages of unnumbered front matter,
+    the common real-world shape. Pages whose computed folio is < 1 print
+    no footer at all, standing in for a cover and title page.
+    """
+    out = tmp_path / "foliated.pdf"
+    doc = fitz.open()
+    for i in range(1, pages + 1):
+        page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 100), f"Body text for sheet {i}.")
+        folio = i + offset
+        if folio >= 1:
+            page.insert_text((300, 740), str(folio))
+    doc.save(str(out))
+    doc.close()
+    return out
+
+
 def build_raster_image_pdf(tmp_path: Path) -> Path:
     """Build a PDF with one page containing a real embedded raster image.
 

@@ -2301,8 +2301,10 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=False):
 
     doc.close()
 
-    # Strip running headers/footers across all pages
+    # Strip running headers/footers across all pages, capturing the printed
+    # folio (the only citation-valid address) as we go.
     cleaned_pages = _strip_running_headers(raw_pages)
+    folio_by_sheet = {sheet: folio for sheet, _, folio in cleaned_pages if folio}
 
     skipped_toc_pages = 0
 
@@ -2331,7 +2333,7 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=False):
         # content the user needs for keyword lookup.
         toc_skip_cutoff = max(20, total_pages // 10)
 
-        for page_num, text in cleaned_pages:
+        for page_num, text, folio in cleaned_pages:
             # Detect index/glossary-style list pages so we can preserve
             # newlines instead of collapsing every entry into one paragraph.
             # Skip this in the front matter so _format_toc + broken-TOC
@@ -2359,12 +2361,20 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=False):
                 skipped_toc_pages += 1
                 log.debug("Skipping broken TOC page %d", page_num)
                 continue
-            f.write(f"<!-- Page {page_num} -->\n\n")
+            f.write(f"<!-- Page sheet={page_num} folio={folio or 'none'} -->\n\n")
             f.write(cleaned)
             f.write("\n\n")
 
     if skipped_toc_pages:
         print(f"  Replaced {skipped_toc_pages} broken TOC page(s) with embedded bookmark TOC")
+
+    report.total_locator_pages = len(cleaned_pages)
+    report.folio_pages = len(folio_by_sheet)
+    report.folio_coverage = (
+        report.folio_pages / report.total_locator_pages
+        if report.total_locator_pages else 0.0
+    )
+    report.locator_type = "printed" if report.folio_pages else "sheet-only"
 
     # Check if we got enough text to consider this a real conversion
     if total_pages > 0 and (pages_with_text / total_pages) < MIN_TEXT_RATIO:

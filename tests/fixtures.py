@@ -4,6 +4,7 @@ Every test that needs a PDF calls one of these builders instead of
 committing a binary fixture to the repo. Each builder returns a Path
 to a file inside the tmp_path fixture directory.
 """
+import zipfile
 from pathlib import Path
 
 import fitz
@@ -144,4 +145,81 @@ def build_scanned_pdf(tmp_path: Path) -> Path:
         page.insert_image(page.rect, stream=img_bytes)
     doc.save(str(out))
     doc.close()
+    return out
+
+
+def build_minimal_epub(tmp_path: Path, name: str = "minimal.epub") -> Path:
+    """Build the smallest valid EPUB 2 that pandoc will convert.
+
+    An EPUB is a zip with an uncompressed `mimetype` entry first, a
+    META-INF/container.xml pointing at the OPF package, and at least one
+    XHTML content document. Synthesized rather than committed so the repo
+    keeps no binary fixtures.
+    """
+    out = tmp_path / name
+
+    container = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<container version="1.0" '
+        'xmlns="urn:oasis:names:tc:opendocument:xmlns:container">\n'
+        '  <rootfiles>\n'
+        '    <rootfile full-path="OEBPS/content.opf" '
+        'media-type="application/oebps-package+xml"/>\n'
+        '  </rootfiles>\n'
+        '</container>\n'
+    )
+    opf = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<package xmlns="http://www.idpf.org/2007/opf" version="2.0" '
+        'unique-identifier="bookid">\n'
+        '  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">\n'
+        '    <dc:title>Minimal Book</dc:title>\n'
+        '    <dc:language>en</dc:language>\n'
+        '    <dc:identifier id="bookid">urn:uuid:bookconvert-test</dc:identifier>\n'
+        '  </metadata>\n'
+        '  <manifest>\n'
+        '    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>\n'
+        '    <item id="ncx" href="toc.ncx" '
+        'media-type="application/x-dtbncx+xml"/>\n'
+        '  </manifest>\n'
+        '  <spine toc="ncx">\n'
+        '    <itemref idref="ch1"/>\n'
+        '  </spine>\n'
+        '</package>\n'
+    )
+    ncx = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">\n'
+        '  <head><meta name="dtb:uid" content="urn:uuid:bookconvert-test"/></head>\n'
+        '  <docTitle><text>Minimal Book</text></docTitle>\n'
+        '  <navMap>\n'
+        '    <navPoint id="np1" playOrder="1">\n'
+        '      <navLabel><text>Chapter One</text></navLabel>\n'
+        '      <content src="ch1.xhtml"/>\n'
+        '    </navPoint>\n'
+        '  </navMap>\n'
+        '</ncx>\n'
+    )
+    ch1 = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<html xmlns="http://www.w3.org/1999/xhtml">\n'
+        '  <head><title>Chapter One</title></head>\n'
+        '  <body>\n'
+        '    <h1>Chapter One</h1>\n'
+        '    <p>An epub is reflowable, so it has no printed page numbers.</p>\n'
+        '  </body>\n'
+        '</html>\n'
+    )
+
+    with zipfile.ZipFile(out, "w") as zf:
+        # The mimetype entry must be first and stored uncompressed.
+        zf.writestr(
+            zipfile.ZipInfo("mimetype"),
+            "application/epub+zip",
+            compress_type=zipfile.ZIP_STORED,
+        )
+        zf.writestr("META-INF/container.xml", container)
+        zf.writestr("OEBPS/content.opf", opf)
+        zf.writestr("OEBPS/toc.ncx", ncx)
+        zf.writestr("OEBPS/ch1.xhtml", ch1)
     return out

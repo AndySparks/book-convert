@@ -2772,6 +2772,9 @@ def convert_with_pandoc(book_path, output_dir):
     output keeps the book's natural reading order without page markers.
     Images are referenced but not extracted (BookConvert is a text-only
     pipeline; pulling images would inflate output and break offline use).
+    Returns a ConversionReport and writes the sidecar, like every other
+    backend; its `locator_type` is always "none" because an epub is
+    reflowable and has no pages to address.
     Raises ConversionError on failure.
     """
     print(f"Converting with pandoc: {book_path.name}")
@@ -2828,7 +2831,21 @@ def convert_with_pandoc(book_path, output_dir):
             f.write("\n")
 
     print(f"  -> {output_file}")
-    return True
+
+    # EPUB is reflowable: it has no pages, so no locator of any kind is
+    # recoverable. That is exactly the case the ingestion gate most needs to
+    # detect, so pandoc writes a sidecar declaring `locator_type: "none"`
+    # rather than writing nothing — silence is indistinguishable from a
+    # conversion that never ran. Page counts stay at their defaults; a
+    # fabricated `total_pages` would be its own small lie.
+    report = ConversionReport(
+        source=str(book_path),
+        output=str(output_file),
+        method="pandoc",
+    )
+    _apply_backend_locator_type(report)
+    write_report(output_file.with_suffix(".report.json"), report)
+    return report
 
 
 def convert_with_pymupdf4llm(pdf_path, output_dir):
@@ -3030,6 +3047,15 @@ def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False,
 
     try:
         if suffix == ".epub":
+            # Pandoc now returns a ConversionReport like its siblings and
+            # writes its own sidecar. The cleanup pass is deliberately NOT
+            # run here: it repairs PDF *extraction* artifacts (dropped-space
+            # joins, stray-consonant citation ghosts, pymupdf4llm
+            # picture-text garble) — see cleanup.py's module docstring, "PDF
+            # text extraction (all backends)". Pandoc's text comes from the
+            # epub's HTML, which carries none of those defects, so running
+            # the pass would be spending a dictionary sweep on text that
+            # cannot need it.
             return bool(convert_with_pandoc(book_path, output_dir))
         if method == "ocr":
             result = convert_with_ocr(book_path, output_dir)

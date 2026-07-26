@@ -290,3 +290,63 @@ def test_backend_locator_declarations(method, expected):
     convert._apply_backend_locator_type(report)
     assert report.locator_type == expected
     assert report.locator_type in LOCATOR_TYPES
+
+
+def test_pandoc_epub_conversion_writes_a_none_locator_sidecar(tmp_path):
+    """An EPUB can never carry a printed page number — say so in the sidecar.
+
+    This is the case the ingestion gate most needs to detect. A pandoc run
+    that wrote no sidecar at all would be indistinguishable from a
+    conversion that never ran, which is the original bug this bet exists to
+    kill.
+    """
+    import shutil
+
+    import convert
+    from tests import fixtures
+
+    if shutil.which("pandoc") is None:
+        pytest.skip("pandoc not installed")
+
+    epub = fixtures.build_minimal_epub(tmp_path)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    report = convert.convert_with_pandoc(epub, out_dir)
+
+    # Pandoc now returns a ConversionReport like every other backend.
+    assert isinstance(report, ConversionReport)
+    assert report.method == "pandoc"
+    assert report.locator_type == "none"
+
+    sidecar = out_dir / f"{epub.stem}.report.json"
+    assert sidecar.exists()
+    data = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert data["method"] == "pandoc"
+    assert data["locator_type"] == "none"
+    # Page counts stay at their defaults; an epub has no pages to count.
+    assert not data.get("total_pages")
+
+
+def test_convert_book_epub_route_produces_a_sidecar(tmp_path):
+    """The dispatch path, not just the backend, must leave a sidecar behind."""
+    import shutil
+
+    import convert
+    from tests import fixtures
+
+    if shutil.which("pandoc") is None:
+        pytest.skip("pandoc not installed")
+
+    epub = fixtures.build_minimal_epub(tmp_path, name="dispatch.epub")
+    out_dir = tmp_path / "out"
+
+    assert convert.convert_book(epub, out_dir) is True
+
+    sidecar = out_dir / "dispatch.report.json"
+    assert sidecar.exists()
+    data = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert data["locator_type"] == "none"
+    # Cleanup is deliberately skipped on the epub route (it repairs PDF
+    # extraction artifacts), so the sidecar must not claim it ran.
+    assert not data.get("cleaned")

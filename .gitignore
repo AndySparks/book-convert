@@ -21,3 +21,6 @@ output/**/*.txt
 
 # Keep directory structure
 !.gitkeep
+
+# Subagent-driven-development scratch (ledger, briefs, review packages)
+.superpowers/

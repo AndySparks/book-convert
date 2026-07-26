@@ -649,10 +649,12 @@ def _strip_running_headers(pages_text):
         pages_text: list of (page_num, raw_text) tuples
 
     Returns:
-        list of (page_num, cleaned_text) tuples
+        list of (page_num, cleaned_text, folio) tuples, where folio is the
+        printed page number captured from the running header/footer as a
+        string ("47", "xii"), or None when the page carries none.
     """
     if len(pages_text) < 5:
-        return pages_text
+        return [(page_num, text, None) for page_num, text in pages_text]
 
     # Collect the first few and last few lines from each page
     # to detect running headers/footers regardless of position
@@ -737,6 +739,7 @@ def _strip_running_headers(pages_text):
     for page_num, text in pages_text:
         lines = text.split('\n')
         cleaned = []
+        folio_candidates = []   # (rank, value)
         for j, line in enumerate(lines):
             stripped = line.strip()
             if not stripped:
@@ -776,10 +779,13 @@ def _strip_running_headers(pages_text):
                         log.debug("  Stripped inline header on page %d: prefix=%r", page_num, prefix)
                         break
 
-            # Strip standalone page numbers (arabic or roman) at start/end of page
+            # Capture-then-strip standalone page numbers (arabic or roman).
+            # This is the printed folio — the only address that is valid for
+            # citation. It used to be discarded here.
             if (is_near_top or is_near_bottom) and (
                 standalone_pagenum.match(stripped) or roman_pagenum.match(stripped)
             ):
+                folio_candidates.append((0 if is_near_bottom else 1, stripped))
                 continue
 
             # Strip "CHAPTER TITLE | page" or "page | BOOK TITLE" running headers
@@ -790,12 +796,23 @@ def _strip_running_headers(pages_text):
                 log.debug("  Stripping pipe header/footer on page %d: %r", page_num, stripped)
                 continue
 
-            # Strip trailing page number appended to last line
+            # Strip trailing page number appended to last line, capturing it
+            # as a last-resort folio candidate.
             if is_last:
-                line = re.sub(r'\s+\d{1,4}\s*$', '', line)
+                m_trail = re.search(r'\s+(\d{1,4})\s*$', line)
+                if m_trail:
+                    folio_candidates.append((2, m_trail.group(1)))
+                    line = line[:m_trail.start()]
 
             cleaned.append(line)
-        result.append((page_num, '\n'.join(cleaned)))
+        # Key on rank only: min() is stable, so equal ranks resolve to the
+        # first candidate encountered. Comparing whole tuples would break
+        # ties lexicographically by value ("12" < "47"), which is wrong.
+        folio = (
+            min(folio_candidates, key=lambda c: c[0])[1]
+            if folio_candidates else None
+        )
+        result.append((page_num, '\n'.join(cleaned), folio))
 
     return result
 

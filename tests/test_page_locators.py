@@ -30,3 +30,45 @@ def test_report_locator_fields_round_trip(tmp_path):
     assert data["folio_pages"] == 20
     assert data["folio_offset"] == -12
     assert data["folio_offset_consistent"] is True
+
+
+def test_strip_running_headers_returns_three_tuples():
+    import convert
+    pages = [(i, f"Body text page {i}.\n{i + 10}") for i in range(1, 8)]
+    result = convert._strip_running_headers(pages)
+    assert all(len(t) == 3 for t in result)
+
+
+def test_captures_bottom_standalone_folio():
+    import convert
+    # Sheet i carries printed folio i+10 as a standalone bottom line.
+    pages = [(i, f"Body text for page {i}.\n{i + 10}") for i in range(1, 8)]
+    result = convert._strip_running_headers(pages)
+    folios = [folio for _, _, folio in result]
+    assert folios == ["11", "12", "13", "14", "15", "16", "17"]
+    # And the folio must be gone from the body.
+    assert "11" not in result[0][1]
+
+
+def test_captures_roman_folio():
+    import convert
+    romans = ["i", "ii", "iii", "iv", "v", "vi"]
+    pages = [(i + 1, f"Front matter {i}.\n{r}") for i, r in enumerate(romans)]
+    result = convert._strip_running_headers(pages)
+    assert [f for _, _, f in result] == romans
+
+
+def test_page_with_no_folio_yields_none():
+    import convert
+    pages = [(i, f"Body text page {i} with no page number.") for i in range(1, 8)]
+    result = convert._strip_running_headers(pages)
+    assert all(folio is None for _, _, folio in result)
+
+
+def test_short_document_early_return_still_three_tuples():
+    """The len < 5 early return must not leak 2-tuples to the caller."""
+    import convert
+    pages = [(1, "Only one page."), (2, "Second page.")]
+    result = convert._strip_running_headers(pages)
+    assert all(len(t) == 3 for t in result)
+    assert all(folio is None for _, _, folio in result)

@@ -46,22 +46,61 @@ def build_figure_pdf(tmp_path: Path) -> Path:
     return out
 
 
-def build_foliated_pdf(tmp_path: Path, pages: int = 8, offset: int = -4) -> Path:
+def build_foliated_pdf(
+    tmp_path: Path,
+    pages: int = 8,
+    offset: int = -4,
+    skip_folios_on: tuple = (),
+    name: str = "foliated.pdf",
+) -> Path:
     """Build a PDF whose pages carry a printed folio in the footer.
 
     Sheet i (1-based) prints folio i + offset. With the default offset of
     -4, sheet 5 prints "1" — i.e. four pages of unnumbered front matter,
     the common real-world shape. Pages whose computed folio is < 1 print
     no footer at all, standing in for a cover and title page.
+
+    `skip_folios_on` names sheets that print NO footer even though their
+    folio would be >= 1 — standing in for the real-world case where the
+    printed number was lost to extraction (OCR miss, figure-covered
+    footer). Those sheets are the ones interpolation must fill in.
     """
-    out = tmp_path / "foliated.pdf"
+    out = tmp_path / name
     doc = fitz.open()
+    skip = set(skip_folios_on)
     for i in range(1, pages + 1):
         page = doc.new_page(width=612, height=792)
         page.insert_text((72, 100), f"Body text for sheet {i}.")
         folio = i + offset
-        if folio >= 1:
+        if folio >= 1 and i not in skip:
             page.insert_text((300, 740), str(folio))
+    doc.save(str(out))
+    doc.close()
+    return out
+
+
+def build_renumbering_pdf(tmp_path: Path, name: str = "renumber.pdf") -> Path:
+    """Build a PDF whose printed numbering RESTARTS partway through.
+
+    Sheets 3-8 print folios 1-6 (offset -2). Sheet 9 onward is a second
+    section restarting at 1 (offset -8), the shape of endnotes or a
+    part-opener that resets. No single constant offset explains both runs,
+    so `_derive_folio_offset` must refuse and NOTHING may be interpolated.
+
+    Sheets 12 and 14 print no footer at all — those are the uncaptured
+    sheets a buggy implementation would fill with confident wrong numbers.
+    """
+    out = tmp_path / name
+    doc = fitz.open()
+    for i in range(1, 17):
+        page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 100), f"Body text for sheet {i}.")
+        if i in (12, 14):
+            continue  # printed number lost to extraction
+        if 3 <= i <= 8:
+            page.insert_text((300, 740), str(i - 2))
+        elif i >= 9:
+            page.insert_text((300, 740), str(i - 8))
     doc.save(str(out))
     doc.close()
     return out

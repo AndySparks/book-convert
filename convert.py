@@ -817,6 +817,34 @@ def _strip_running_headers(pages_text):
     return result
 
 
+def _is_arabic_folio(folio):
+    """True only for a plain ASCII decimal folio like "47".
+
+    `str.isdigit()` is too permissive: it accepts superscripts ("²", a
+    footnote marker that can reach folio_candidates) where `int()` then
+    raises ValueError and aborts the whole conversion, and it accepts
+    Arabic-Indic digits, which are not a numbering sequence we can safely
+    interpolate against. `.isascii() and .isdecimal()` admits exactly the
+    characters `int()` will accept as a base-10 page number.
+    """
+    return bool(folio) and folio.isascii() and folio.isdecimal()
+
+
+def _arabic_folio_sheets(folio_by_sheet):
+    """Sheets carrying an arabic captured folio — the interpolation window.
+
+    Interpolation is permitted only BETWEEN captured samples, so the caller
+    clamps to the closed interval [min, max] of these sheets. Roman samples
+    are excluded here for the same reason they are excluded from offset
+    derivation: they belong to a separate numbering sequence and must not
+    widen the arabic window.
+    """
+    return [
+        sheet for sheet, folio in folio_by_sheet.items()
+        if _is_arabic_folio(folio)
+    ]
+
+
 def _derive_folio_offset(folio_by_sheet):
     """Derive a constant sheet->folio offset from captured samples.
 
@@ -836,13 +864,12 @@ def _derive_folio_offset(folio_by_sheet):
     offsets = [
         int(folio) - sheet
         for sheet, folio in folio_by_sheet.items()
-        if folio.isdigit()
+        if _is_arabic_folio(folio)
     ]
     if len(offsets) < 3:
         return (None, False)
-    first = offsets[0]
-    if all(o == first for o in offsets):
-        return (first, True)
+    if len(set(offsets)) == 1:
+        return (offsets[0], True)
     return (None, False)
 
 
@@ -2335,6 +2362,15 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=False):
     cleaned_pages = _strip_running_headers(raw_pages)
     folio_by_sheet = {sheet: folio for sheet, _, folio in cleaned_pages if folio}
     folio_offset, folio_consistent = _derive_folio_offset(folio_by_sheet)
+    # Interpolation is permitted only BETWEEN captured samples. Outside that
+    # span there is no evidence the offset still holds — endnotes or a second
+    # numbering sequence past the last sample contribute no samples, so they
+    # cannot disagree, and extrapolating there invents confident wrong page
+    # numbers a reader cannot detect.
+    _arabic_sheets = _arabic_folio_sheets(folio_by_sheet)
+    folio_span = (
+        (min(_arabic_sheets), max(_arabic_sheets)) if _arabic_sheets else None
+    )
 
     skipped_toc_pages = 0
 
@@ -2392,7 +2428,10 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=False):
                 log.debug("Skipping broken TOC page %d", page_num)
                 continue
             effective_folio = folio
-            if effective_folio is None and folio_consistent:
+            if (effective_folio is None
+                    and folio_consistent
+                    and folio_span is not None
+                    and folio_span[0] <= page_num <= folio_span[1]):
                 candidate = page_num + folio_offset
                 # Never invent a folio for pages that precede printed page 1.
                 if candidate >= 1:

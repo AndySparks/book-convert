@@ -30,6 +30,13 @@ class ConversionReport:
     skipped_toc_pages: int = 0
     cleaned: bool = False
     cleanup: dict = field(default_factory=dict)
+    # Table fidelity signals. `table_captions_seen` counts "TABLE 9-1" /
+    # "EXHIBIT 3" style captions in the output text; `tables_emitted`
+    # counts grids the converter actually produced. A wide gap means the
+    # captions survived but their grids collapsed into prose — the
+    # failure mode a spot-check of three pages will not catch.
+    tables_emitted: int = 0
+    table_captions_seen: int = 0
     warnings: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:

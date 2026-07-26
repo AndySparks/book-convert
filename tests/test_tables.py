@@ -6,7 +6,9 @@ rebuild a proper grid from the dict-level line coordinates so markdown
 tables land in the output rather than a scrambled dump of cells.
 """
 import re
+
 import convert
+from report import ConversionReport
 
 
 # --- _cluster_1d ---
@@ -237,3 +239,59 @@ def test_extract_page_text_with_regions_matches_legacy_table_path(tmp_path):
         result = convert._extract_page_text_with_regions(page, regions)
     assert "Surrounding prose line" in result
     assert "| a | b |" in result
+
+
+# --- count_table_signals / apply_table_signals ---------------------------
+#
+# These back the `tables_emitted` / `table_captions_seen` sidecar fields.
+# The gap between the two is the only cheap signal that a book's grids
+# collapsed into prose, so the counts have to be right on real-world
+# caption shapes (bold, appendix letters, EXHIBIT) and must not be fooled
+# by prose that merely mentions a table.
+
+
+def test_count_table_signals_counts_gfm_grid_and_caption():
+    md = "TABLE A-16 Mean Motive Levels\n\n| a | b |\n|---|---|\n| 1 | 2 |\n"
+    assert convert.count_table_signals(md) == (1, 1)
+
+
+def test_count_table_signals_matches_bold_and_exhibit_captions():
+    md = "**TABLE 3.2.** Some Events\n\ntext\n\nEXHIBIT 5-1 Another\n"
+    emitted, captions = convert.count_table_signals(md)
+    assert captions == 2
+    assert emitted == 0
+
+
+def test_count_table_signals_counts_html_tables():
+    md = "TABLE 1 x\n\n<table><tbody><tr><td>a</td></tr></tbody></table>\n"
+    assert convert.count_table_signals(md) == (1, 1)
+
+
+def test_count_table_signals_ignores_prose_mentions_of_tables():
+    md = "As Table 3.2 shows, the effect held. See the table above.\n"
+    assert convert.count_table_signals(md) == (0, 0)
+
+
+def test_apply_table_signals_warns_when_captions_outnumber_grids(tmp_path):
+    """The collapsed-grid case: captions survive, grids don't."""
+    md = tmp_path / "out.md"
+    md.write_text("TABLE 1 a\n\nTABLE 2 b\n\n| x |\n|---|\n| 1 |\n", encoding="utf-8")
+    report = ConversionReport(source="s.pdf", output=str(md), method="marker")
+    convert.apply_table_signals(report, md)
+    assert (report.table_captions_seen, report.tables_emitted) == (2, 1)
+    assert any("collapsed into prose" in w for w in report.warnings)
+
+
+def test_apply_table_signals_silent_when_grids_match_captions(tmp_path):
+    md = tmp_path / "out.md"
+    md.write_text("TABLE 1 a\n\n| x |\n|---|\n| 1 |\n", encoding="utf-8")
+    report = ConversionReport(source="s.pdf", output=str(md), method="marker")
+    convert.apply_table_signals(report, md)
+    assert report.warnings == []
+
+
+def test_apply_table_signals_survives_unreadable_output(tmp_path):
+    report = ConversionReport(source="s.pdf", output="nope.md", method="marker")
+    convert.apply_table_signals(report, tmp_path / "does-not-exist.md")
+    assert report.tables_emitted == 0
+    assert any("could not count tables" in w for w in report.warnings)

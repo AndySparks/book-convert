@@ -22,8 +22,10 @@ Usage:
 """
 
 import argparse
+import collections
 import logging
 import os
+import shlex
 import re
 import shutil
 import subprocess
@@ -1442,6 +1444,68 @@ def _words_to_text(words):
     return "\n".join(lines)
 
 
+# --- Table fidelity accounting ---------------------------------------------
+#
+# Independent of *how* a backend finds tables, we want a cheap post-hoc
+# answer to "did the grids survive?" Counting captions and emitted grids
+# separately gives that: a book with 47 "TABLE A-n" captions and 12
+# emitted grids lost 35 tables into prose, and the sidecar says so
+# without anyone reading 330 pages.
+
+# Matches a caption at the head of a line, with or without markdown bold:
+#   TABLE A-16 Mean Motive ...
+#   **TABLE 3.2.** Some Events ...
+#   EXHIBIT 5-1
+_TABLE_CAPTION_LINE_RE = re.compile(
+    r'^\s*\**\s*(?:TABLE|Table|TAB\.|Tab\.|EXHIBIT|Exhibit)\s+'
+    r'[A-Z]?-?\d+(?:[-.]\d+)?',
+    re.MULTILINE,
+)
+
+# A GFM table is identified by its separator row (|---|---|), which is the
+# one line every well-formed markdown table must have exactly once.
+_GFM_SEPARATOR_RE = re.compile(r'^\s*\|(?:\s*:?-+:?\s*\|)+\s*$', re.MULTILINE)
+
+# marker with --html_tables_in_markdown emits <table> instead of GFM.
+_HTML_TABLE_RE = re.compile(r'<table[\s>]', re.IGNORECASE)
+
+
+def count_table_signals(markdown_text):
+    """Return (tables_emitted, table_captions_seen) for a markdown body.
+
+    `tables_emitted` counts both GFM grids and raw HTML tables, so the
+    number stays comparable across renderer settings. Neither count is a
+    quality measure — a mangled grid still counts as emitted. The signal
+    is the *gap* between the two.
+    """
+    emitted = (
+        len(_GFM_SEPARATOR_RE.findall(markdown_text))
+        + len(_HTML_TABLE_RE.findall(markdown_text))
+    )
+    captions = len(_TABLE_CAPTION_LINE_RE.findall(markdown_text))
+    return emitted, captions
+
+
+def apply_table_signals(report, output_path):
+    """Populate a report's table counters by reading the emitted markdown.
+
+    Best-effort: a read failure leaves the counters at zero rather than
+    failing a conversion that otherwise succeeded.
+    """
+    try:
+        text = Path(output_path).read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        report.warnings.append(f"could not count tables: {e}")
+        return
+    report.tables_emitted, report.table_captions_seen = count_table_signals(text)
+    missing = report.table_captions_seen - report.tables_emitted
+    if missing > 0:
+        report.warnings.append(
+            f"{missing} table caption(s) have no emitted grid — "
+            f"those tables likely collapsed into prose"
+        )
+
+
 # --- Table detection and grid reconstruction -------------------------------
 #
 # Many books embed comparison tables with captions like "TABLE 9-1" followed
@@ -2344,10 +2408,13 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=False):
     return report
 
 
-def convert_with_marker(pdf_path, output_dir):
+def convert_with_marker(pdf_path, output_dir, marker_args=None):
     """Convert a text-based PDF using Marker.
 
     Runs Marker in an isolated temp directory to avoid corrupting existing output.
+    `marker_args` is a list of extra flags forwarded verbatim to
+    `marker_single` (see `marker_single --help`) — this is how table-quality
+    flags like `--use_llm` and `--html_tables_in_markdown` are reached.
     Raises ConversionError on failure.
     """
     print(f"Converting with Marker: {pdf_path.name}")
@@ -2356,13 +2423,32 @@ def convert_with_marker(pdf_path, output_dir):
         # Newer marker-pdf releases (≥1.0) take the output path via the
         # `--output_dir` flag rather than as a second positional argument.
         # Passing it positionally raises "Got unexpected extra argument".
-        result = subprocess.run(
-            ["marker_single", str(pdf_path), "--output_dir", tmpdir],
-            capture_output=True,
+        cmd = ["marker_single", str(pdf_path), "--output_dir", tmpdir]
+        if marker_args:
+            cmd.extend(marker_args)
+            print(f"  extra marker args: {' '.join(marker_args)}")
+
+        # Stream marker's output rather than capturing it. A book-length
+        # scan is a 1+ hour run and marker's only progress signal is its
+        # per-stage progress bars on stderr; capture_output swallowed
+        # them entirely, so a backgrounded run looked identical to a hung
+        # one until it finished. We keep a rolling tail for the error
+        # message instead.
+        tail = collections.deque(maxlen=40)
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
+            bufsize=1,
         )
-        if result.returncode != 0:
-            raise ConversionError(f"Marker error: {result.stderr}")
+        for line in proc.stdout:
+            tail.append(line)
+            sys.stdout.write(line)
+            sys.stdout.flush()
+        returncode = proc.wait()
+        if returncode != 0:
+            raise ConversionError(f"Marker error: {''.join(tail)}")
 
         # Find the generated markdown in the temp directory
         tmp_path = Path(tmpdir)
@@ -2427,6 +2513,11 @@ def convert_with_marker(pdf_path, output_dir):
                 report.total_pages = len(src)
         except Exception as e:
             report.warnings.append(f"could not read page count: {e}")
+        apply_table_signals(report, target)
+        print(
+            f"  tables: {report.tables_emitted} emitted / "
+            f"{report.table_captions_seen} captions seen"
+        )
         report_path = target.with_suffix(".report.json")
         write_report(report_path, report)
         return report
@@ -2489,6 +2580,11 @@ def convert_with_ocr(pdf_path, output_dir):
     report.ocr_pages = total_pages
     extracted = output_file.read_text(encoding="utf-8", errors="replace")
     report.warnings.extend(_ocr_quality_warnings(extracted))
+    # The tesseract path has no table reconstruction at all, so this
+    # almost always reports "0 emitted / N captions". That is the point:
+    # it makes the OCR backend's table blindness visible in the sidecar
+    # instead of leaving it to be discovered during a scholarly pass.
+    apply_table_signals(report, output_file)
     report_path = output_file.with_suffix(".report.json")
     write_report(report_path, report)
     return report
@@ -2741,6 +2837,7 @@ def convert_with_docling(pdf_path, output_dir):
     return report
 
 
+
 def _apply_cleanup(result):
     """Run the post-conversion cleanup pass on a backend's markdown output.
 
@@ -2762,6 +2859,12 @@ def _apply_cleanup(result):
 
     result.cleaned = True
     result.cleanup = stats
+    # Cleanup can unwrap a picture-text table (a ToC rendered as a grid),
+    # which changes the table counts the backend recorded a moment ago.
+    # Recount against the post-cleanup text so the sidecar describes the
+    # file that actually landed on disk.
+    if cleaned != original:
+        result.tables_emitted, result.table_captions_seen = count_table_signals(cleaned)
     if not stats.get("dejoin_available"):
         result.warnings.append(
             "cleanup: de-join pass skipped (pyspellchecker not installed; "
@@ -2772,7 +2875,7 @@ def _apply_cleanup(result):
 
 
 def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False,
-                 extract_images=False, clean=True):
+                 extract_images=False, clean=True, marker_args=None):
     """Convert a single book (PDF or EPUB) to markdown.
 
     Returns True on success, False on failure. Never raises.
@@ -2783,6 +2886,8 @@ def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False,
     When clean is True (default), a verbatim-safe post-conversion pass repairs
     common extraction artifacts (dropped-space joins, stray-consonant citation
     ghosts, picture-text garble) on the emitted markdown.
+    `marker_args` is forwarded to the marker backend only; other backends
+    ignore it.
     """
     book_path = Path(book_path)
     output_dir = Path(output_dir)
@@ -2797,7 +2902,7 @@ def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False,
         if method == "ocr":
             result = convert_with_ocr(book_path, output_dir)
         elif method == "marker":
-            result = convert_with_marker(book_path, output_dir)
+            result = convert_with_marker(book_path, output_dir, marker_args=marker_args)
         elif method == "pymupdf4llm":
             result = convert_with_pymupdf4llm(book_path, output_dir)
         elif method == "docling":
@@ -2823,7 +2928,7 @@ def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False,
             try:
                 check_dependencies(chosen)
                 if chosen == "marker":
-                    result = convert_with_marker(book_path, output_dir)
+                    result = convert_with_marker(book_path, output_dir, marker_args=marker_args)
                 else:
                     result = convert_with_ocr(book_path, output_dir)
                 if clean:
@@ -2987,6 +3092,18 @@ def main():
              "the markdown (pymupdf backend only).",
     )
     parser.add_argument(
+        "--marker-args",
+        default="",
+        help="Extra flags forwarded verbatim to marker_single (marker backend "
+             "only). Quote the whole string, e.g. "
+             "--marker-args '--use_llm --html_tables_in_markdown'. Run "
+             "`marker_single --help` for the full list; the table-quality "
+             "flags are --use_llm (fixes merged headers and split rows, "
+             "needs an LLM service configured) and "
+             "--html_tables_in_markdown (preserves colspan/rowspan that GFM "
+             "cannot express).",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose/debug logging output",
@@ -3027,6 +3144,11 @@ def main():
         method = "marker"
     else:
         method = args.method
+
+    # shlex so a quoted --marker-args string splits the way a shell would.
+    marker_args = shlex.split(args.marker_args) if args.marker_args else None
+    if marker_args and method != "marker":
+        print(f"Warning: --marker-args is ignored by the {method} backend")
 
     output_dir = Path(args.output)
     books = collect_books(args.input)
@@ -3070,6 +3192,7 @@ def main():
             auto_ocr=args.auto_ocr,
             extract_images=args.extract_images,
             clean=not args.no_clean,
+            marker_args=marker_args,
         ):
             success += 1
             converted_books.append(book)

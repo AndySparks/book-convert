@@ -64,10 +64,27 @@ other 94% safe rather than a guess.
   break. The known consumer is mc-wiki's `tools/wiki-maintain.py`. The 217
   already-converted vault files retain the old format until reconverted, so
   consumers must parse both formats during the transition.
-- `pandoc` (EPUB) and `marker` declare `locator_type: "none"` — always, with
-  no interpolation attempted. Sources ingested through them cannot be cited
-  by page — by design, because no page number exists to cite (EPUB has no
-  pages; `marker`'s own layout model doesn't currently expose one).
+- **Only `pymupdf` can produce a citable page number.** The full per-backend
+  capability map (`BACKEND_LOCATOR_TYPE`, `convert.py`) is:
+
+  | Backend | `locator_type` | Citable by page? |
+  |---|---|---|
+  | `pymupdf` | decided at runtime — `printed` if any folio was captured, else `sheet-only` | Yes, when `printed` |
+  | `pymupdf4llm` | `sheet-only` (fixed) | No |
+  | `ocr` | `sheet-only` (fixed) | No |
+  | `marker` | `none` (fixed) | No |
+  | `pandoc` | `none` (fixed) | No |
+  | `docling` | `none` (fixed) | No |
+
+  `pymupdf` is deliberately absent from `BACKEND_LOCATOR_TYPE` — it is the one
+  backend that decides its own `locator_type` at the end of a conversion, so
+  do not treat it as having a fixed value.
+
+  All three `none` backends — `marker`, `pandoc`, `docling` — declare
+  `locator_type: "none"` always, with no interpolation attempted. Sources
+  ingested through them cannot be cited by page: for `pandoc` because EPUB is
+  reflowable and no page number exists to cite; for `marker` and `docling`
+  because neither pipeline currently exposes a page address we can trust.
 
 ## Alternatives rejected
 

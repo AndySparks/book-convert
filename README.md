@@ -110,11 +110,16 @@ for EPUB.
 Never present a `sheet` value as a page number. The sidecar declares which
 you have:
 
-| `locator_type` | Meaning |
-|---|---|
-| `printed` | Real page numbers were captured |
-| `sheet-only` | PDF sheet index only |
-| `none` | No locators emitted at all |
+| `locator_type` | Meaning | Backends |
+|---|---|---|
+| `printed` | Real page numbers were captured | `pymupdf`, when folios were actually found |
+| `sheet-only` | PDF sheet index only | `pymupdf` (no folios found), `pymupdf4llm`, `ocr` |
+| `none` | No locators emitted at all | `marker`, `pandoc` (EPUB), `docling` |
+
+`pymupdf` is the only backend that can produce a citable page number, and it
+decides between `printed` and `sheet-only` at runtime. The other five have a
+fixed capability. Read `locator_type` from the sidecar rather than assuming it
+from the `--method` you asked for.
 
 Where folio survival is sparse, `folio_offset` is derived from the captured
 samples and used to fill the gaps — but only when at least 3 arabic samples

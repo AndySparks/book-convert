@@ -119,16 +119,53 @@ The de-join step uses `pyspellchecker` (installed by `requirements.txt`). If
 it is ever missing, cleanup degrades gracefully — the dictionary-free repairs
 still run and a warning is recorded.
 
+### Passing flags through to marker
+
+The marker backend accepts extra flags via `--marker-args`, forwarded
+verbatim to `marker_single`:
+
+```bash
+python convert.py input/MyBook.pdf --method marker --marker-args '--use_llm'
+python convert.py input/MyBook.pdf --method marker --marker-args '--html_tables_in_markdown'
+```
+
+The two that matter for table-heavy books:
+
+- `--use_llm` activates marker's LLM table processors, which fix merged
+  headers and rows split across lines. It needs an LLM service
+  configured (`ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, or a local ollama
+  endpoint) — see `marker_single --help` for `--llm_service`.
+- `--html_tables_in_markdown` emits `<table>` with real `colspan` /
+  `rowspan`. GFM markdown cannot express spanning header cells at all,
+  so this is the only way to preserve a multi-level table header —
+  at the cost of much less readable output.
+
+Run `marker_single --help` for the full flag list.
+
 ### Sidecar conversion report
 
 Every conversion writes a `<stem>.report.json` alongside the markdown
 containing: method used, page count, OCR pages, extracted assets,
-quality score, `cleaned`/`cleanup` stats, and any warnings. Useful for
-inspecting a batch run:
+quality score, `cleaned`/`cleanup` stats, table counts, and any warnings.
+Useful for inspecting a batch run:
 
 ```bash
 jq '.method,.extracted_assets,.quality_score' output/*.report.json
 ```
+
+**Table fidelity.** `table_captions_seen` counts `TABLE 9-1` style
+captions in the output; `tables_emitted` counts the grids actually
+produced. A wide gap means the captions survived but their grids
+collapsed into prose — the failure a three-page spot-check will miss.
+The report adds an explicit warning when captions outnumber grids.
+
+```bash
+jq '.tables_emitted, .table_captions_seen, .warnings' output/*.report.json
+```
+
+Note that the `ocr` (tesseract) backend has **no** table reconstruction
+at all, so it reports `0` emitted against however many captions it read.
+For a book with real tables, use `marker`.
 
 ### Archive source PDFs after conversion
 

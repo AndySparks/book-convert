@@ -16,18 +16,24 @@ import pytest
 import convert
 
 
-VM_STAT_HEALTHY = """Mach Virtual Memory Statistics: (page size of 4096 bytes)
+VM_STAT_HEALTHY = """Mach Virtual Memory Statistics: (page size of 16384 bytes)
 Pages free:                             1157727.
 Pages active:                           2000000.
-Pages inactive:                         3000000.
-Pages speculative:                        50000.
+Pages inactive:                          300000.
+Pages purgeable:                          42273.
+Pages occupied by compressor:             10000.
 """
 
-VM_STAT_STARVED = """Mach Virtual Memory Statistics: (page size of 4096 bytes)
-Pages free:                               24136.
-Pages active:                           8000000.
-Pages inactive:                           30000.
-Pages speculative:                          500.
+# The machine that prompted the fix: 0.21 GB genuinely free, 22.6 GB
+# compressed, marker crawling. Note the large `Pages inactive` — counting it
+# as available is what made the first version of this check report
+# "18.1 GB free" and stay silent.
+VM_STAT_STARVED = """Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                               13500.
+Pages active:                           2000000.
+Pages inactive:                         1142478.
+Pages purgeable:                          26000.
+Pages occupied by compressor:           1477849.
 """
 
 
@@ -37,16 +43,55 @@ def fake_run(stdout, returncode=0):
     return _run
 
 
-def test_free_memory_parses_vm_stat(monkeypatch):
+def test_free_memory_counts_free_plus_purgeable(monkeypatch):
     monkeypatch.setattr(convert.subprocess, "run", fake_run(VM_STAT_HEALTHY))
     monkeypatch.setattr(convert.sys, "platform", "darwin")
-    # free + inactive = 4,157,727 pages * 4096 bytes
-    assert convert._free_memory_gb() == pytest.approx(4157727 * 4096 / 1024**3)
+    assert convert._free_memory_gb() == pytest.approx((1157727 + 42273) * 16384 / 1024**3)
+
+
+def test_inactive_pages_are_not_counted_as_available(monkeypatch):
+    """The bug this fix exists for. On the starved machine, free+purgeable is
+    ~0.6 GB while free+inactive is ~18 GB — and the inactive-counting version
+    stayed silent while marker crawled. Inactive pages on Apple Silicon are
+    largely compressor-backed; reclaiming them causes the stall being
+    predicted."""
+    monkeypatch.setattr(convert.subprocess, "run", fake_run(VM_STAT_STARVED))
+    monkeypatch.setattr(convert.sys, "platform", "darwin")
+    got = convert._free_memory_gb()
+    assert got == pytest.approx((13500 + 26000) * 16384 / 1024**3)
+    assert got < 1.0, "inactive pages leaked back into the availability figure"
+
+
+def test_compressor_occupancy_is_read(monkeypatch):
+    monkeypatch.setattr(convert.subprocess, "run", fake_run(VM_STAT_STARVED))
+    monkeypatch.setattr(convert.sys, "platform", "darwin")
+    assert convert._compressed_gb() == pytest.approx(1477849 * 16384 / 1024**3)
+
+
+def test_a_large_compressor_is_named_when_memory_is_short(monkeypatch, capsys):
+    """Apple Silicon compresses before it swaps, so a machine can be badly
+    oversubscribed while reporting zero swap. The compressor is the tell."""
+    monkeypatch.setattr(convert, "_free_memory_gb", lambda: 0.2)
+    monkeypatch.setattr(convert, "_swap_used_gb", lambda: 0.0)
+    monkeypatch.setattr(convert, "_compressed_gb", lambda: 22.6)
+    convert.warn_if_memory_is_tight(304)
+    err = capsys.readouterr().err
+    assert "23 GB is held in the memory compressor" in err
+    assert "swap is already in use" not in err       # none is, and we don't claim it
+
+
+def test_small_compressor_is_not_mentioned(monkeypatch, capsys):
+    monkeypatch.setattr(convert, "_free_memory_gb", lambda: 0.2)
+    monkeypatch.setattr(convert, "_swap_used_gb", lambda: 0.0)
+    monkeypatch.setattr(convert, "_compressed_gb", lambda: 1.0)
+    convert.warn_if_memory_is_tight(304)
+    assert "compressor" not in capsys.readouterr().err
 
 
 def test_no_warning_when_memory_is_ample(monkeypatch, capsys):
     monkeypatch.setattr(convert, "_free_memory_gb", lambda: 33.5)
     monkeypatch.setattr(convert, "_swap_used_gb", lambda: 0.0)
+    monkeypatch.setattr(convert, "_compressed_gb", lambda: 0.0)
     convert.warn_if_memory_is_tight(304)
     assert capsys.readouterr().err == ""
 

@@ -3020,7 +3020,15 @@ def _pdf_page_count(pdf_path):
 
 
 def _free_memory_gb():
-    """Free + compressible memory in GB, or None if it cannot be determined.
+    """Memory genuinely available now, in GB, or None if undeterminable.
+
+    Counts `Pages free` + `Pages purgeable`. It deliberately does NOT count
+    `Pages inactive`, which the first version of this check did and which made
+    it useless: inactive pages on Apple Silicon are largely compressor-backed,
+    and reclaiming them costs the very stalls this warning exists to predict.
+    Measured on the machine that prompted the fix — 0.21 GB free, 22.6 GB
+    compressed, marker crawling — the inactive-counting version reported
+    "18.1 GB free" and stayed silent.
 
     Parses `vm_stat` (macOS). Returns None anywhere else rather than guessing,
     so the caller degrades to saying nothing.
@@ -3040,8 +3048,32 @@ def _free_memory_gb():
             m = re.match(r"^(.*?):\s+(\d+)\.?$", line)
             if m:
                 stats[m.group(1).strip()] = int(m.group(2))
-        free_pages = stats.get("Pages free", 0) + stats.get("Pages inactive", 0)
-        return free_pages * page_size / (1024 ** 3)
+        available = stats.get("Pages free", 0) + stats.get("Pages purgeable", 0)
+        return available * page_size / (1024 ** 3)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _compressed_gb():
+    """Memory held in the compressor, in GB, or None if undeterminable.
+
+    macOS compresses before it swaps, so on Apple Silicon a machine can be
+    badly oversubscribed while reporting zero swap activity — which is exactly
+    what the first version of this check keyed on and why it missed. A large
+    compressor is the tell that the system is already working to make room.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        out = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5)
+        if out.returncode != 0:
+            return None
+        page_size = 4096
+        m = re.search(r"page size of (\d+) bytes", out.stdout)
+        if m:
+            page_size = int(m.group(1))
+        m = re.search(r"Pages occupied by compressor:\s+(\d+)", out.stdout)
+        return int(m.group(1)) * page_size / (1024 ** 3) if m else None
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
 
@@ -3070,6 +3102,11 @@ def _swap_used_gb():
 # already short.
 SWAP_PRESSURE_GB = 1.0
 
+# A compressor this large means the system is already working hard to make
+# room. Named separately from swap because Apple Silicon reaches for
+# compression first and may never swap at all.
+COMPRESSOR_PRESSURE_GB = 8.0
+
 
 def warn_if_memory_is_tight(page_count=None):
     """Warn before a long conversion when the machine has no room for it.
@@ -3082,8 +3119,13 @@ def warn_if_memory_is_tight(page_count=None):
         return free_gb
     swapping = swap_gb is not None and swap_gb >= SWAP_PRESSURE_GB
     pages = f"{page_count}-page " if page_count else ""
-    swap_note = (f" {swap_gb:.1f} GB of swap is already in use."
-                 if swapping else "")
+    compressed_gb = _compressed_gb()
+    notes = []
+    if swapping:
+        notes.append(f"{swap_gb:.1f} GB of swap is already in use")
+    if compressed_gb is not None and compressed_gb >= COMPRESSOR_PRESSURE_GB:
+        notes.append(f"{compressed_gb:.0f} GB is held in the memory compressor")
+    swap_note = (" " + "; ".join(notes) + "." if notes else "")
     print(
         f"  WARNING: only {free_gb:.1f} GB of memory is free, and marker needs "
         f"about {MARKER_RESIDENT_GB:.0f} GB resident.{swap_note}\n"

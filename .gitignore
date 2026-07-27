@@ -35,3 +35,6 @@ output/**/*.jpeg
 output/**/*.json
 archive/
 logs/
+
+# Per-machine registry of running conversions (advisory concurrency notice)
+.active-conversions.json

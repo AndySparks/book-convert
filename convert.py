@@ -24,6 +24,7 @@ Usage:
 import argparse
 import collections
 import io
+import json
 import logging
 import os
 import shlex
@@ -32,6 +33,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
 from pathlib import Path
 
@@ -3631,6 +3633,97 @@ def _apply_cleanup(result):
     return result
 
 
+# --- concurrent conversions -------------------------------------------------
+#
+# One BookConvert checkout is shared by several agent sessions and by Andy.
+# The realistic collision is not two people converting the same book: it is one
+# workspace running a two-hour OCR of a scanned book while another converts a
+# handful of papers for an unrelated project. Both should proceed — serialising
+# them would make the small job wait hours for no reason — but neither should
+# be surprised by the other.
+#
+# Surprise is the actual cost. A concurrent run halves the CPU each gets and
+# doubles resident memory, which turns an unexplained slowdown into a
+# diagnosis that took an hour of process archaeology to reach: two markers,
+# ~7 GB each, on a machine whose free memory had already gone.
+#
+# So this registry is advisory and never blocks. It answers one question at
+# the moment it matters — "is anything else running, and for how long?" — and
+# composes with the memory warning above, because "4 GB free" means something
+# different when another conversion already holds 8 of them.
+
+ACTIVE_CONVERSIONS = Path(__file__).resolve().parent / ".active-conversions.json"
+
+
+def _process_alive(pid):
+    """Whether `pid` is still running. Stale entries are the normal case:
+    a killed or crashed conversion never gets to clean up after itself."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True          # exists, owned by someone else
+    return True
+
+
+def read_active_conversions(exclude_pid=None):
+    """Live entries from the registry, pruning any whose process has gone."""
+    try:
+        raw = json.loads(ACTIVE_CONVERSIONS.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    return [e for e in raw
+            if isinstance(e, dict)
+            and isinstance(e.get("pid"), int)
+            and e["pid"] != exclude_pid
+            and _process_alive(e["pid"])]
+
+
+def _write_active_conversions(entries):
+    try:
+        ACTIVE_CONVERSIONS.write_text(json.dumps(entries, indent=1) + "\n",
+                                      encoding="utf-8")
+    except OSError:
+        pass                 # advisory only; never fail a conversion over it
+
+
+def register_conversion(pdf_path, method, started_at):
+    """Record this run, and return what was already running.
+
+    Returns the list of other live conversions so the caller can report them.
+    """
+    others = read_active_conversions(exclude_pid=os.getpid())
+    entry = {"pid": os.getpid(), "book": Path(pdf_path).name,
+             "method": method, "started": started_at}
+    _write_active_conversions(others + [entry])
+    return others
+
+
+def unregister_conversion():
+    _write_active_conversions(read_active_conversions(exclude_pid=os.getpid()))
+
+
+def describe_other_conversions(others, now):
+    """One line per concurrent run, or None when there are none."""
+    if not others:
+        return None
+    lines = ["  NOTE: another conversion is already running on this checkout:"]
+    for e in others:
+        try:
+            mins = max(0, int((now - float(e.get("started", now))) // 60))
+            age = f"{mins // 60}h{mins % 60:02d}m" if mins >= 60 else f"{mins}m"
+        except (TypeError, ValueError):
+            age = "unknown"
+        lines.append(f"    - {e.get('book', '?')} ({e.get('method', '?')}), "
+                     f"running {age}, pid {e.get('pid')}")
+    lines.append("  Both will finish. Expect each to be slower, and expect "
+                 "roughly 8 GB more memory in use than you would otherwise.")
+    return "\n".join(lines)
+
+
 def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False,
                  extract_images=False, clean=True, marker_args=None):
     """Convert a single book (PDF or EPUB) to markdown.
@@ -3938,33 +4031,44 @@ def main():
             print(e)
             sys.exit(1)
 
+    # Tell the operator what else is running before anything slow starts.
+    # `try/finally` around the loop so a crash or Ctrl-C still de-registers;
+    # a stale entry would misreport the next run.
+    others = register_conversion(books[0] if books else "?", method, time.time())
+    notice = describe_other_conversions(others, time.time())
+    if notice:
+        print(notice, file=sys.stderr)
+
     success = 0
     failed = 0
     skipped = 0
     converted_books = []  # successfully converted source paths, for --archive
 
-    for book in books:
-        if args.skip_existing:
-            existing = output_dir / f"{book.stem}.md"
-            if existing.exists():
-                print(f"Skipping (already exists): {book.name}")
-                skipped += 1
-                continue
+    try:
+        for book in books:
+            if args.skip_existing:
+                existing = output_dir / f"{book.stem}.md"
+                if existing.exists():
+                    print(f"Skipping (already exists): {book.name}")
+                    skipped += 1
+                    continue
 
-        if convert_book(
-            book,
-            output_dir,
-            method=method,
-            auto_ocr=args.auto_ocr,
-            extract_images=args.extract_images,
-            clean=not args.no_clean,
-            marker_args=marker_args,
-        ):
-            success += 1
-            converted_books.append(book)
-        else:
-            failed += 1
-        print()
+            if convert_book(
+                book,
+                output_dir,
+                method=method,
+                auto_ocr=args.auto_ocr,
+                extract_images=args.extract_images,
+                clean=not args.no_clean,
+                marker_args=marker_args,
+            ):
+                success += 1
+                converted_books.append(book)
+            else:
+                failed += 1
+            print()
+    finally:
+        unregister_conversion()
 
     parts = [f"{success} converted", f"{failed} failed"]
     if skipped:

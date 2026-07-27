@@ -2988,6 +2988,115 @@ def _rewrite_marker_page_locators(target, report):
           + (f", offset {offset:+d}" if offset_consistent else ", offset inconsistent"))
 
 
+# --- memory pre-flight ------------------------------------------------------
+#
+# marker holds its model weights resident — ~8.6 GB on a book-length scan. On a
+# machine with no free RAM those weights get paged in and out continuously, and
+# the run does not fail, it crawls: Ross & Nisbett ran ~50x slower per text unit
+# than Boyatzis on the same laptop (0.14 vs 7 units/sec) purely because free
+# memory had fallen to ~94 MB with 19M swapouts. A 1-hour conversion became a
+# 13-hour one.
+#
+# That is worth a warning and not a block. The estimate is what the operator
+# actually needs — "close something" is only actionable next to "or wait 13
+# hours" — and a wrong guess about headroom must never stop a conversion the
+# user asked for.
+
+MARKER_RESIDENT_GB = 8.6      # measured peak RSS on a 330-page scan
+
+
+def _pdf_page_count(pdf_path):
+    """Page count for the warning message, or None if the PDF won't open.
+
+    Best-effort by design: this exists to make a warning specific, and must
+    never be the reason a conversion does not start.
+    """
+    try:
+        import fitz
+        with fitz.open(str(pdf_path)) as doc:
+            return len(doc)
+    except Exception:      # noqa: BLE001 - cosmetic detail, never fatal
+        return None
+
+
+def _free_memory_gb():
+    """Free + compressible memory in GB, or None if it cannot be determined.
+
+    Parses `vm_stat` (macOS). Returns None anywhere else rather than guessing,
+    so the caller degrades to saying nothing.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        out = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5)
+        if out.returncode != 0:
+            return None
+        stats, page_size = {}, 4096
+        for line in out.stdout.splitlines():
+            m = re.match(r"Mach Virtual Memory Statistics: \(page size of (\d+) bytes\)", line)
+            if m:
+                page_size = int(m.group(1))
+                continue
+            m = re.match(r"^(.*?):\s+(\d+)\.?$", line)
+            if m:
+                stats[m.group(1).strip()] = int(m.group(2))
+        free_pages = stats.get("Pages free", 0) + stats.get("Pages inactive", 0)
+        return free_pages * page_size / (1024 ** 3)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _swap_used_gb():
+    """Swap currently in use, in GB, or None if it cannot be determined."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        out = subprocess.run(["sysctl", "-n", "vm.swapusage"],
+                             capture_output=True, text=True, timeout=5)
+        m = re.search(r"used\s*=\s*([\d.]+)([MG])", out.stdout)
+        if not m:
+            return None
+        value = float(m.group(1))
+        return value / 1024 if m.group(2) == "M" else value
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+# Swap is context, not a trigger. macOS leaves pages swapped out long after the
+# pressure that caused them is gone — this machine still showed 1.2 GB of swap
+# in use with 33 GB free, right after the thrashing conversion was killed — so
+# swapping alone says nothing about whether the next run has room. Free memory
+# is the decision variable; swap only sharpens the diagnosis when memory is
+# already short.
+SWAP_PRESSURE_GB = 1.0
+
+
+def warn_if_memory_is_tight(page_count=None):
+    """Warn before a long conversion when the machine has no room for it.
+
+    Returns the free-GB figure (or None) so callers can record it.
+    """
+    free_gb = _free_memory_gb()
+    swap_gb = _swap_used_gb()
+    if free_gb is None or free_gb >= MARKER_RESIDENT_GB:
+        return free_gb
+    swapping = swap_gb is not None and swap_gb >= SWAP_PRESSURE_GB
+    pages = f"{page_count}-page " if page_count else ""
+    swap_note = (f" {swap_gb:.1f} GB of swap is already in use."
+                 if swapping else "")
+    print(
+        f"  WARNING: only {free_gb:.1f} GB of memory is free, and marker needs "
+        f"about {MARKER_RESIDENT_GB:.0f} GB resident.{swap_note}\n"
+        f"  This {pages}conversion will still finish, but the model weights will "
+        f"page in and out of swap the whole way and it can run an order of "
+        f"magnitude slower — hours instead of about one.\n"
+        f"  Close what you can (browsers and Electron apps are usually the "
+        f"biggest holders) and re-run, or leave it going in the background.",
+        file=sys.stderr,
+    )
+    return free_gb
+
+
 def convert_with_marker(pdf_path, output_dir, marker_args=None):
     """Convert a text-based PDF using Marker.
 
@@ -2998,6 +3107,7 @@ def convert_with_marker(pdf_path, output_dir, marker_args=None):
     Raises ConversionError on failure.
     """
     print(f"Converting with Marker: {pdf_path.name}")
+    warn_if_memory_is_tight(_pdf_page_count(pdf_path))
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # Newer marker-pdf releases (≥1.0) take the output path via the

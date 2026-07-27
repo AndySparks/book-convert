@@ -23,6 +23,7 @@ Usage:
 
 import argparse
 import collections
+import io
 import logging
 import os
 import shlex
@@ -933,11 +934,16 @@ def _derive_page_offset(page_printed_by_pdf_index):
     """Derive a constant page_pdf->page_printed offset from captured samples.
 
     Returns (offset, is_consistent). `offset` is page_printed - page_pdf.
-    Consistency requires at least 3 arabic samples that all agree; a book
-    that renumbers partway through (part-openers restarting at 1,
-    roman-to-arabic front matter) will disagree, and we refuse to
-    interpolate rather than invent page numbers. Roman page numbers never
+    Consistency requires at least 3 arabic samples that overwhelmingly
+    agree; a book that renumbers partway through (part-openers restarting
+    at 1, roman-to-arabic front matter) will disagree in a way this refuses,
+    rather than inventing page numbers. Roman page numbers never
     participate — they belong to a separate numbering sequence.
+
+    Unanimity is not special-cased: a unanimous set is simply one with 100%
+    agreement and no dissenters, so `_dominant_page_offset` returns it by
+    the same path. Callers that need to know WHICH samples dissented use
+    `_page_offset_outliers`.
 
     Args:
         page_printed_by_pdf_index: dict of PDF page index -> printed page
@@ -946,25 +952,86 @@ def _derive_page_offset(page_printed_by_pdf_index):
     Returns:
         (int | None, bool)
     """
-    offsets = [
-        int(page_printed) - page_pdf
+    by_index = {
+        page_pdf: int(page_printed) - page_pdf
         for page_pdf, page_printed in page_printed_by_pdf_index.items()
         if _is_arabic_page_number(page_printed)
-    ]
-    if len(offsets) < 3:
+    }
+    if len(by_index) < 3:
         return (None, False)
-    if len(set(offsets)) == 1:
-        return (offsets[0], True)
-    return (None, False)
+    dominant = _dominant_page_offset(by_index)
+    return (dominant, True) if dominant is not None else (None, False)
 
 
-# What kind of page address each backend can produce. `pymupdf` is absent
-# because it decides at runtime (printed when printed page numbers were
-# captured, pdf_only otherwise) — see convert_with_pymupdf.
+# A lone sample disagreeing with hundreds of others is an OCR misread of one
+# digit, not evidence that the book renumbers. Boyatzis printed 9 and 39 on
+# two pages that marker read as "0" and "30"; under strict unanimity those
+# two misreads both blocked interpolation for 42 other pages AND were
+# published verbatim as page numbers — the exact harm the locator work
+# exists to prevent.
+#
+# Rejecting an outlier is only safe when the consensus is overwhelming and
+# the dissent is scattered. A book that genuinely renumbers (endnotes
+# restarting at 1, a second sequence after an insert) produces a CONTIGUOUS
+# RUN of samples at the new offset, never isolated singletons. That
+# distinction is what keeps this from silently flattening a real second
+# numbering sequence into a wrong one.
+# This threshold also sets the floor on sample size: any dissent at all
+# needs 20+ samples to stay above 0.95 (d/n <= 0.05), so a separate
+# minimum-samples guard would be unreachable and is deliberately absent
+# rather than sitting here implying protection it never provides.
+_OFFSET_CONSENSUS_MIN_AGREEMENT = 0.95
+# Two dissenters within this many sheets of each other count as a run.
+_OFFSET_DISSENT_RUN_GAP = 2
+
+
+def _dominant_page_offset(offset_by_pdf_index):
+    """Return the consensus offset, or None if the disagreement is real.
+
+    Args:
+        offset_by_pdf_index: dict of PDF page index -> (printed - pdf)
+
+    Returns:
+        int | None
+    """
+    counts = collections.Counter(offset_by_pdf_index.values())
+    dominant, agreeing = counts.most_common(1)[0]
+    total = len(offset_by_pdf_index)
+    if agreeing / total < _OFFSET_CONSENSUS_MIN_AGREEMENT:
+        return None
+    dissenters = sorted(i for i, o in offset_by_pdf_index.items() if o != dominant)
+    # Any two dissenters close together are a numbering change, not noise.
+    for earlier, later in zip(dissenters, dissenters[1:]):
+        if later - earlier <= _OFFSET_DISSENT_RUN_GAP:
+            return None
+    return dominant
+
+
+def _page_offset_outliers(page_printed_by_pdf_index, offset):
+    """PDF page indices whose captured folio contradicts the derived offset.
+
+    These are misreads. They must be suppressed rather than emitted: a
+    captured value is normally the most trustworthy kind of address, so a
+    corrupted one is published with full confidence and a reader cannot tell.
+    Suppressing lets interpolation supply the right number instead.
+    """
+    if offset is None:
+        return set()
+    return {
+        page_pdf
+        for page_pdf, page_printed in page_printed_by_pdf_index.items()
+        if _is_arabic_page_number(page_printed)
+        and int(page_printed) - page_pdf != offset
+    }
+
+
+# What kind of page address each backend can produce. `pymupdf` and `marker`
+# are absent because they decide at runtime (printed when printed page
+# numbers were captured, pdf_only otherwise) — see convert_with_pymupdf and
+# convert_with_marker.
 BACKEND_PAGE_NUMBERING = {
     "ocr": "pdf_only",
     "pymupdf4llm": "pdf_only",
-    "marker": "none",
     "pandoc": "none",
     "docling": "none",
 }
@@ -981,6 +1048,207 @@ def _apply_backend_page_numbering(report):
     if fixed:
         report.page_numbering = fixed
     return report
+
+
+# --- marker page locators --------------------------------------------------
+#
+# marker is the only backend that works on a scanned book: pymupdf needs a
+# text layer the scan does not have, and tesseract has no table handling.
+# So marker is precisely the backend a home-scanned print book depends on,
+# and it was the one declaring `page_numbering: "none"`.
+#
+# marker already reads the printed page number — it classifies the running
+# head as a PageHeader block and then discards it. Three renderer flags
+# recover it: `--paginate_output` emits a `{N}-----` separator per page, and
+# `--keep_pageheader_in_output` / `--keep_pagefooter_in_output` stop the
+# furniture being dropped. We request all three, capture the folio, and strip
+# the furniture back out.
+#
+# Both bands are required. Book designers put a running head carrying the
+# folio on ordinary pages but a *drop folio* at the foot of chapter openers
+# and full-page tables — exactly the pages a statistical appendix consists
+# of. Reading only the head captured 0 folios across Boyatzis's entire
+# appendix while appearing to work.
+#
+# A rejected alternative: leave marker in its default configuration and read
+# folios independently, by OCRing a crop of each page's margins. That makes
+# the body provably untouched, which is why it was tried — but a blind crop
+# cannot tell a page number from a table cell. On Boyatzis it captured 237
+# folios to marker's 288, and the appendix (full-page statistical tables)
+# polluted the samples so badly that no offset could be derived at all: the
+# book would have ended up with NO interpolated page numbers and 33 wrong
+# captured ones. marker's layout model knows what a running head is; a
+# rectangle does not.
+#
+# The separator carries marker's own page index, so pages that produce no
+# text still advance the count — the address never drifts.
+
+MARKER_LOCATOR_ARGS = (
+    "--paginate_output",
+    "--keep_pageheader_in_output",
+    "--keep_pagefooter_in_output",
+)
+
+# marker's page separator: "{58}------------------------------------------------"
+_MARKER_PAGE_SEPARATOR_RE = re.compile(r'^\{(\d+)\}-{2,}\s*$')
+
+# A folio standing alone on its line. Arabic is capped at 4 digits so a year
+# ("1982") that survived into the band is admitted here and then rejected by
+# the offset check, rather than silently reinterpreted as a page number.
+_MARKER_FOLIO_RE = re.compile(r'^(\d{1,4})$')
+
+# A markdown heading is content, never page furniture. marker renders
+# furniture as plain text, so a `#` line is by definition not a running head.
+_MARKDOWN_HEADING_RE = re.compile(r'^#{1,6}\s')
+
+# How many leading (or trailing) lines of a page may be furniture. A running
+# head is one or two lines — a title and a folio; anything deeper is body.
+_MARKER_HEADER_SCAN_LINES = 3
+
+# How many pages a line must recur on before it counts as furniture. Verso
+# and recto usually carry different heads, so a book alternates between two.
+_MARKER_HEADER_MIN_REPEATS = 3
+
+
+def _split_marker_pages(text):
+    """Split paginated marker output into (page_index, page_text) pairs.
+
+    Returns None when the text carries no separators at all, which means
+    marker ran without `--paginate_output` and no page addressing is
+    possible. Callers must treat that as "no locators", never as page 0.
+    """
+    lines = text.split('\n')
+    pages, current, index = [], [], None
+    for line in lines:
+        m = _MARKER_PAGE_SEPARATOR_RE.match(line)
+        if m:
+            if index is not None:
+                pages.append((index, '\n'.join(current)))
+            index, current = int(m.group(1)), []
+            continue
+        current.append(line)
+    if index is None:
+        return None
+    pages.append((index, '\n'.join(current)))
+    return pages
+
+
+def _is_marker_folio(line):
+    """Whether a line is shaped like a printed page number.
+
+    Arabic zero is rejected outright: no book prints page 0, so a captured
+    "0" is always a misread (Boyatzis's page 9, on a scan). That is a
+    validity check, not a judgment call — unlike the consensus rule, it needs
+    no evidence from the rest of the book.
+    """
+    m = _MARKER_FOLIO_RE.match(line)
+    if m:
+        return int(m.group(1)) >= 1
+    return bool(_is_roman_page_number(line))
+
+
+def _band_lines(page_text, from_end=False):
+    """First (or last) few non-empty lines of a page, in reading order."""
+    lines = [l for l in page_text.split('\n') if l.strip()]
+    return lines[-_MARKER_HEADER_SCAN_LINES:] if from_end else lines[:_MARKER_HEADER_SCAN_LINES]
+
+
+def _marker_recurring_lines(pages, from_end=False):
+    """Return the lines that recur often enough to be page furniture.
+
+    Frequency is the discriminator that makes stripping safe. A book's
+    running head appears on many pages; a first line of body prose appears
+    once. Requiring recurrence means an unusual opening sentence is never
+    mistaken for furniture, at the cost of leaving a head that genuinely
+    appears twice — the safe direction to err, since a stray head in the body
+    is visible while deleted body text is not.
+    """
+    counts = collections.Counter()
+    for _index, page in pages:
+        seen = set()
+        for line in _band_lines(page, from_end):
+            stripped = line.strip()
+            # Folios differ every page, so they never recur; they are matched
+            # by shape, not by frequency.
+            if stripped and not _is_marker_folio(stripped):
+                seen.add(stripped)
+        counts.update(seen)
+    return {line for line, n in counts.items() if n >= _MARKER_HEADER_MIN_REPEATS}
+
+
+def _strip_marker_page_furniture(page_text, header_lines, footer_lines):
+    """Remove running head and foot from one page, returning (folio, body).
+
+    Each band is consumed from its own end and stops at the first line that
+    is neither known furniture nor a bare folio — the moment body text
+    starts, stripping stops.
+
+    Capture and stripping are deliberately decoupled. Capture scans the whole
+    band, so a folio sitting *behind* an unrecognised head line is still
+    read; stripping removes only lines it positively recognises. They can
+    therefore disagree — a folio may be captured and left in the body — and
+    that is the safe direction: a stray number in the text is visible,
+    whereas deleting a line that turned out to be prose is not.
+    """
+    lines = page_text.split('\n')
+
+    def first_folio(band):
+        for line in band:
+            if _is_marker_folio(line.strip()):
+                return line.strip()
+        return None
+
+    folio = (first_folio(_band_lines(page_text))
+             or first_folio(_band_lines(page_text, from_end=True)))
+
+    def strippable(line, known):
+        stripped = line.strip()
+        if _MARKDOWN_HEADING_RE.match(stripped):
+            return False
+        return _is_marker_folio(stripped) or stripped in known
+
+    start, consumed = 0, 0
+    while start < len(lines) and consumed < _MARKER_HEADER_SCAN_LINES:
+        if not lines[start].strip():
+            start += 1
+        elif strippable(lines[start], header_lines):
+            start += 1
+            consumed += 1
+        else:
+            break
+
+    end, consumed = len(lines), 0
+    while end > start and consumed < _MARKER_HEADER_SCAN_LINES:
+        if not lines[end - 1].strip():
+            end -= 1
+        elif strippable(lines[end - 1], footer_lines):
+            end -= 1
+            consumed += 1
+        else:
+            break
+
+    return folio, '\n'.join(lines[start:end]).strip('\n')
+
+
+def _marker_page_locators(text):
+    """Capture printed page numbers from paginated marker output.
+
+    Returns (pages, page_printed_by_index) where `pages` is a list of
+    (page_index, body_text) with page furniture removed, or (None, {}) when
+    the output was not paginated.
+    """
+    pages = _split_marker_pages(text)
+    if pages is None:
+        return None, {}
+    header_lines = _marker_recurring_lines(pages, from_end=False)
+    footer_lines = _marker_recurring_lines(pages, from_end=True)
+    cleaned, printed = [], {}
+    for index, page in pages:
+        folio, body = _strip_marker_page_furniture(page, header_lines, footer_lines)
+        if folio:
+            printed[index] = folio
+        cleaned.append((index, body))
+    return cleaned, printed
 
 
 def _merge_split_caps_headings(lines):
@@ -2644,6 +2912,82 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=False):
     return report
 
 
+def _rewrite_marker_page_locators(target, report):
+    """Replace marker's page separators with typed locator comments.
+
+    Rewrites `{58}-----` into `<!-- page_pdf=58 page_printed=43 -->`, having
+    stripped the running head and foot the locator flags asked marker to keep.
+
+    Interpolation follows the same rules as the pymupdf path and for the same
+    reason: printed numbers are captured sparsely (a chapter opener or a
+    full-page table often shows none), and a gap between two agreeing samples
+    is safe to fill while anything outside that span is a guess. Ambiguity
+    refuses the whole book rather than inventing an address a reader cannot
+    check.
+
+    A no-op when the output is not paginated, which is what happens if a
+    caller overrides the locator flags through `--marker-args`.
+    """
+    text = target.read_text(encoding="utf-8", errors="replace")
+    pages, page_printed_by_index = _marker_page_locators(text)
+    if pages is None:
+        report.page_numbering = "none"
+        report.warnings.append(
+            "marker output was not paginated, so no page locators were "
+            "emitted; the source cannot be cited by page"
+        )
+        return
+
+    offset, offset_consistent = _derive_page_offset(page_printed_by_index)
+    # Captured-but-contradicting folios are OCR misreads. Drop them so
+    # interpolation can supply the right number, and so the span below is
+    # not stretched by a corrupted sample.
+    misread = _page_offset_outliers(page_printed_by_index, offset if offset_consistent else None)
+    for index in misread:
+        report.warnings.append(
+            f"page_pdf={index}: captured printed page "
+            f"'{page_printed_by_index[index]}' contradicts the book's "
+            f"offset {offset:+d}; treated as an OCR misread and replaced "
+            f"by the interpolated value"
+        )
+        del page_printed_by_index[index]
+
+    arabic = _arabic_page_pdf_indices(page_printed_by_index)
+    span = (min(arabic), max(arabic)) if arabic else None
+
+    out = []
+    emitted = captured = 0
+    for index, body in pages:
+        printed = page_printed_by_index.get(index)
+        effective = printed
+        if (effective is None
+                and offset_consistent
+                and span is not None
+                and span[0] <= index <= span[1]):
+            candidate = index + offset
+            if candidate >= 1:
+                effective = str(candidate)
+        out.append(f"<!-- page_pdf={index} page_printed={effective or 'none'} -->\n")
+        emitted += 1
+        if printed:
+            captured += 1
+        if body.strip():
+            out.append('\n' + body.strip('\n') + '\n\n')
+        else:
+            out.append('\n')
+    target.write_text(''.join(out), encoding="utf-8")
+
+    report.page_locator_count = emitted
+    report.page_printed_count = captured
+    report.page_printed_coverage = captured / emitted if emitted else 0.0
+    report.page_numbering = "printed" if captured else "pdf_only"
+    report.page_printed_offset = offset
+    report.page_printed_offset_consistent = offset_consistent
+    print(f"  page locators: {emitted} pages, {captured} printed numbers "
+          f"captured, coverage {report.page_printed_coverage:.2f}"
+          + (f", offset {offset:+d}" if offset_consistent else ", offset inconsistent"))
+
+
 def convert_with_marker(pdf_path, output_dir, marker_args=None):
     """Convert a text-based PDF using Marker.
 
@@ -2660,6 +3004,10 @@ def convert_with_marker(pdf_path, output_dir, marker_args=None):
         # `--output_dir` flag rather than as a second positional argument.
         # Passing it positionally raises "Got unexpected extra argument".
         cmd = ["marker_single", str(pdf_path), "--output_dir", tmpdir]
+        # Page-locator flags go on unconditionally: a source filed without a
+        # citable address cannot be fixed later without reconverting, and
+        # marker is the only backend that works on a scanned book.
+        cmd.extend(MARKER_LOCATOR_ARGS)
         if marker_args:
             cmd.extend(marker_args)
             print(f"  extra marker args: {' '.join(marker_args)}")
@@ -2749,6 +3097,7 @@ def convert_with_marker(pdf_path, output_dir, marker_args=None):
                 report.total_pages = len(src)
         except Exception as e:
             report.warnings.append(f"could not read page count: {e}")
+        _rewrite_marker_page_locators(target, report)
         apply_table_signals(report, target)
         print(
             f"  tables: {report.tables_emitted} emitted / "

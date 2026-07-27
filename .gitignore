@@ -24,3 +24,14 @@ output/**/*.txt
 
 # Subagent-driven-development scratch (ledger, briefs, review packages)
 .superpowers/
+
+# Conversion artifacts. `output/**/*.md` alone was not enough: a `git add -A`
+# also swept in sidecar reports, extracted images, run logs, and the archived
+# source books. Each user generates their own.
+output/**/*.report.json
+output/**/*.png
+output/**/*.jpg
+output/**/*.jpeg
+output/**/*.json
+archive/
+logs/

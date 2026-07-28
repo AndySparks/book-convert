@@ -154,14 +154,13 @@ which you have:
 
 | `page_numbering` | Meaning | Backends |
 |---|---|---|
-| `printed` | Real page numbers were captured | `pymupdf`, when printed page numbers were actually found |
-| `pdf_only` | PDF page index only | `pymupdf` (no printed page numbers found), `pymupdf4llm`, `ocr` |
-| `none` | No locators emitted at all | `marker`, `pandoc` (EPUB), `docling` |
+| `printed` | Real page numbers were captured | `pymupdf` and `marker`, when printed page numbers were actually found |
+| `pdf_only` | PDF page index only | `pymupdf` / `marker` (no printed numbers found), `pymupdf4llm`, `ocr` |
+| `none` | No locators emitted at all | `pandoc` (EPUB — reflowable, no pages exist), `docling` |
 
-`pymupdf` is the only backend that can produce a citable page number, and it
-decides between `printed` and `pdf_only` at runtime. The other five have a
-fixed capability. Read `page_numbering` from the sidecar rather than
-assuming it from the `--method` you asked for.
+`pymupdf` and `marker` both decide between `printed` and `pdf_only` at runtime;
+the others have a fixed capability. Read `page_numbering` from the sidecar
+rather than assuming it from the `--method` you asked for.
 
 Where printed-page-number survival is sparse, `page_printed_offset` is
 derived from the captured samples and used to fill the gaps — but only

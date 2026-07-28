@@ -124,13 +124,25 @@ assuming it from the `--method` you asked for.
 
 Where printed-page-number survival is sparse, `page_printed_offset` is
 derived from the captured samples and used to fill the gaps — but only
-when at least 3 arabic samples all agree
+when at least 3 arabic samples reach a consensus
 (`page_printed_offset_consistent: true`), and only for PDF pages that fall
 between the first and last captured sample. A book that renumbers partway
 through, or that has printed page numbers only in part of the text, gets no
 interpolation (or interpolation clamped to that span) rather than invented
 page numbers — and interpolation never produces a printed page number
 below 1.
+
+Consensus is not unanimity. At least 85% of the arabic samples must agree
+on one offset, and the samples that disagree must be scattered — two
+dissenters within 2 sheets of each other are read as a renumbering or a
+page-order defect and refuse the whole book. Below 8 samples, unanimity is
+still required, because at that size a misread digit and a genuine second
+numbering sequence are indistinguishable. A folio that contradicts an
+adopted consensus is treated as an OCR misread: it is suppressed, replaced
+by the interpolated value, and reported in `warnings` rather than published
+as a page number a reader would trust. Every refusal is likewise reported
+in `warnings` with its reason, so low coverage always comes with an
+account of itself.
 
 Check coverage after any conversion:
 

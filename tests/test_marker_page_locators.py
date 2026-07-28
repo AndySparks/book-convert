@@ -164,6 +164,179 @@ def test_roman_front_matter_folio_is_captured():
     assert body.strip() == "Preface text."
 
 
+# --- folios sharing a line with a running head -----------------------------
+#
+# Landsberg's *The Tao of Coaching* sets the folio at the top outer corner of
+# every ordinary page, on the same line as the running head — "52 THE TAO OF
+# COACHING" on a verso, "MOTIVATING 67" on a recto. Only chapter openers set
+# it alone, so a rule anchored to a bare number captured 19 of 136 pages and
+# the pages it captured were almost all chapter openers.
+#
+# Lifting the numeral out is cheap; lifting the WRONG numeral out is the
+# expensive part, because a folio is published as the number printed on the
+# page and a reader has no way to check it. The numeral must be at the page
+# edge, what remains must be recognised furniture, and the line as a whole
+# must NOT recur — a folio changes every page, so a band line that repeats
+# verbatim has a constant number in it and the number is part of the title.
+
+
+def body_for(sheet):
+    """Page body distinct per sheet, so no body line can look like furniture."""
+    return [f"Body line {n} of sheet {sheet}." for n in range(1, 9)]
+
+
+def landsberg(sheets, offset=-9):
+    """Pages laid out like *The Tao of Coaching*: folio beside a running head,
+    pinned to the outer edge — leading on a verso, trailing on a recto."""
+    out = []
+    for sheet in sheets:
+        printed = sheet + offset
+        head = (f"{printed} THE TAO OF COACHING" if printed % 2 == 0
+                else f"MOTIVATING {printed}")
+        out.append(marker_page(sheet, head, *body_for(sheet)))
+    return "".join(out)
+
+
+def locators(text):
+    _pages, printed = convert._marker_page_locators(text)
+    return printed
+
+
+def test_folio_leading_a_running_head_on_a_verso_is_captured():
+    printed = locators(landsberg(range(60, 72)))
+    assert printed[61] == "52"          # "52 THE TAO OF COACHING"
+    assert printed[63] == "54"
+
+
+def test_folio_trailing_a_running_head_on_a_recto_is_captured():
+    printed = locators(landsberg(range(60, 72)))
+    assert printed[62] == "53"          # "MOTIVATING 53"
+    assert printed[64] == "55"
+
+
+def test_both_page_sides_are_captured_across_the_whole_book():
+    """The failure was systematic, so the fix has to be too: this book gave
+    up 19 of 136 pages, and every one of these sheets carries a folio."""
+    sheets = range(60, 96)
+    printed = locators(landsberg(sheets))
+    assert set(printed) == set(sheets)
+    assert all(int(v) - k == -9 for k, v in printed.items())
+
+
+def test_the_running_head_line_goes_with_its_folio():
+    """It is furniture entire. Left behind, "52 THE TAO OF COACHING" is a
+    stray line of page apparatus in the middle of the prose — which is what
+    the old rule actually produced, because it recognised neither half."""
+    text = landsberg(range(60, 72))
+    pages, _printed = convert._marker_page_locators(text)
+    body = dict(pages)[61]
+    assert "THE TAO OF COACHING" not in body
+    assert body.strip().startswith("Body line 1 of sheet 61.")
+
+
+def test_a_band_line_with_no_number_yields_no_folio():
+    """Some rectos in this edition carry the running head alone."""
+    text = "".join(
+        marker_page(s, "TAKING ACCOUNT OF OTHERS' SKILL AND WILL", *body_for(s))
+        for s in range(60, 66))
+    assert locators(text) == {}
+
+
+def test_a_head_whose_number_never_changes_is_a_title_not_a_folio():
+    """The false positive that matters. A year in the running head sits at
+    the page edge and reads exactly like a folio — except that it is the
+    same number on every page, and a folio never is."""
+    text = "".join(marker_page(s, "1984 AND ALL THAT", *body_for(s))
+                   for s in range(20, 26))
+    assert locators(text) == {}
+
+
+def test_a_constant_chapter_number_in_the_head_is_not_a_folio():
+    text = "".join(marker_page(s, "CHAPTER 4", *body_for(s))
+                   for s in range(20, 26))
+    assert locators(text) == {}
+
+
+def test_a_one_off_line_starting_with_a_number_is_not_a_running_head():
+    """Recurrence is the whole safety argument. "1 Introduction" opening a
+    page once is prose, or a list item, and must not be read as page 1."""
+    text = ("".join(marker_page(s, f"Some opening line for sheet {s}.",
+                                *body_for(s)) for s in range(20, 26))
+            + marker_page(26, "1 Introduction", *body_for(26)))
+    assert locators(text) == {}
+
+
+def test_a_roman_numeral_is_never_lifted_out_of_a_shared_line():
+    """A bag of roman letters matches ordinary words, and beside a running
+    head there is no digit shape to lean on. Roman front matter sets its
+    folio alone often enough that the trade is not worth taking."""
+    text = "".join(marker_page(s, f"xi{'i' * (s - 5)} THE TAO OF COACHING",
+                               *body_for(s)) for s in range(6, 12))
+    assert locators(text) == {}
+
+
+def test_a_number_at_both_ends_of_a_known_head_is_refused():
+    """Ambiguity, not a coin toss: if removing the leading numeral and
+    removing the trailing numeral both leave recognised furniture, there is
+    no evidence about which one is the folio."""
+    known = {"MOTIVATING 67", "12 MOTIVATING"}
+    assert convert._accepted_embedded_folio("12 MOTIVATING 67", known) is None
+    assert convert._accepted_embedded_folio("12 MOTIVATING 67",
+                                            {"MOTIVATING 67"}) == "12"
+
+
+def test_a_table_row_is_never_a_running_head():
+    """Its last cell is a number for reasons that have nothing to do with
+    pagination, and its shape can recur across a run of table pages.
+
+    Boyatzis's statistical appendix is pages of tables with a repeated stub
+    column and a varying final cell — the exact shape of a running head with
+    a folio, and the reason the blind margin crop was abandoned."""
+    assert convert._embedded_folio_candidates("Stage IV | 1.525 | 1612") == []
+    assert convert._embedded_folio_candidates("1612 | Stage IV | 1.525") == []
+    text = "".join(marker_page(s, f"Stage IV | 1.525 | {s - 13}", *body_for(s))
+                   for s in range(300, 306))
+    assert locators(text) == {}
+
+
+def test_a_markdown_heading_or_image_is_never_a_running_head():
+    """Content by construction: marker renders furniture as plain text, so a
+    `#` line is by definition not a head, and a figure carries no folio.
+    Both shapes recur in this edition — "# 4 Correcting common coaching
+    myths" on every chapter opener, a full-page picture on every facing page.
+
+    Belt-and-braces, and the test says so rather than implying more: the
+    edge-token regexes cannot match these lines anyway, because neither the
+    first nor the last token is a bare numeral. The exclusion exists so that
+    loosening those regexes later cannot quietly start reading headings as
+    pagination. No test claims to exercise a reachable failure here.
+    """
+    assert convert._embedded_folio_candidates("#### 4 THE MYTHS") == []
+    assert convert._embedded_folio_candidates("![](_page_59_Picture_0.jpeg)") == []
+    assert convert._embedded_folio_candidates("> 12 Quoted line") == []
+
+
+def test_a_folio_standing_alone_wins_over_one_shared_with_a_head():
+    """The ordering that makes this change unable to touch a book whose
+    folios already stand alone: the bare-folio pass runs over both bands
+    before the shared-line rule is tried at all. Here the head carries a
+    part number that would otherwise be read as the folio."""
+    text = "".join(marker_page(s, f"PART TWO {s - 500}", *body_for(s), str(s - 13))
+                   for s in range(500, 506))
+    printed = locators(text)
+    assert printed == {s: str(s - 13) for s in range(500, 506)}
+
+
+def test_a_book_with_drop_folios_alone_is_completely_unchanged():
+    """Regression guard for *Accidental Empires*, which sets the folio alone
+    at the foot of every page and already captures 0.833 of the book."""
+    text = "".join(marker_page(s, "#### ACCIDENTAL EMPIRES", *body_for(s),
+                               str(s - 13)) for s in range(100, 140))
+    printed = locators(text)
+    assert len(printed) == 40
+    assert convert._derive_page_offset(printed) == (-13, True)
+
+
 # --- _rewrite_marker_page_locators ----------------------------------------
 
 
@@ -234,6 +407,22 @@ def test_misread_folio_is_replaced_by_the_interpolated_value(tmp_path):
     assert "<!-- page_pdf=54 page_printed=30 -->" not in out
     assert any("misread" in w and "page_pdf=54" in w for w in report.warnings)
     assert report.page_printed_count == 39
+
+
+def test_landsberg_layout_ends_up_fully_citable(tmp_path):
+    """End to end, on the layout the issue is about. Every sheet carries its
+    printed number, the offset rests on the whole body rather than on the
+    chapter openers alone, and no running head survives into the prose."""
+    out, report = _rewrite(tmp_path, landsberg(range(60, 96)))
+    assert report.page_numbering == "printed"
+    assert report.page_printed_offset == -9
+    assert report.page_printed_offset_consistent is True
+    assert report.page_printed_count == 36
+    assert report.page_printed_coverage == 1.0
+    assert "<!-- page_pdf=61 page_printed=52 -->" in out
+    assert "<!-- page_pdf=62 page_printed=53 -->" in out
+    assert "THE TAO OF COACHING" not in out
+    assert report.warnings == []
 
 
 def test_rewrite_marks_unpaginated_output_as_uncitable(tmp_path):

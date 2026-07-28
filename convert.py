@@ -1184,6 +1184,87 @@ _MARKER_HEADER_SCAN_LINES = 3
 # and recto usually carry different heads, so a book alternates between two.
 _MARKER_HEADER_MIN_REPEATS = 3
 
+# --- folios sharing a line with a running head -----------------------------
+#
+# On many editions the folio does not stand alone: it sits on the same line
+# as the running head, pinned to the OUTER edge of the spread — leading on a
+# verso ("52 THE TAO OF COACHING"), trailing on a recto ("MOTIVATING 67").
+# `_MARKER_FOLIO_RE` anchors both ends, so every one of those lines was
+# discarded whole. On Landsberg's *The Tao of Coaching* that cost 117 of 136
+# pages: the folios that survived were almost all chapter openers, the one
+# place the edition sets the folio alone.
+#
+# The extraction rule is deliberately narrow, because a wrong folio is worse
+# than no folio — it is published as the number printed on the page, on the
+# one field a reader has no way to check. A numeral is lifted out of a band
+# line only when ALL of:
+#
+#   1. it is the first or the last token on the line (a folio is pinned to
+#      the page edge; a number in the middle of a head is part of the title);
+#   2. what remains, with the numeral removed, is RECURRING FURNITURE — the
+#      same residue appears in the same band on >= _MARKER_HEADER_MIN_REPEATS
+#      pages. This is the frequency argument the module already rests on for
+#      stripping: a running head repeats, a line of prose does not;
+#   3. the line as a whole does NOT recur. A folio changes every page, so a
+#      band line that repeats verbatim has a CONSTANT number in it — a year
+#      in the title, a part or chapter number — and is furniture entire;
+#   4. the residue contains a letter, so "52 1984" (two numerals, no head)
+#      is refused rather than guessed at;
+#   5. only ONE end of the line qualifies. If stripping the leading numeral
+#      and stripping the trailing numeral both leave known furniture, the
+#      line is ambiguous and yields nothing.
+#
+# Roman folios are NOT read out of a shared line. A bag of roman letters
+# matches ordinary words ("civil", "mild", "did"), and unlike the arabic
+# case there is no digit shape to lean on; roman front matter sets the folio
+# alone often enough that the trade is not worth the false positives.
+_MARKER_EMBEDDED_FOLIO_LEADING_RE = re.compile(r'^(\d{1,4})\s+(\S.*)$')
+_MARKER_EMBEDDED_FOLIO_TRAILING_RE = re.compile(r'^(.*\S)\s+(\d{1,4})$')
+
+# Line shapes that are never a running head: markdown headings and block
+# quotes are content by construction, images carry no folio, and a table row
+# ends in numbers for reasons that have nothing to do with pagination.
+_MARKER_NOT_A_RUNNING_HEAD_RE = re.compile(r'^(?:#{1,6}\s|>|!\[)')
+
+_HAS_LETTER_RE = re.compile(r'[^\W\d_]')
+
+
+def _embedded_folio_candidates(line):
+    """(folio, running-head residue) pairs for a band line, edge tokens only.
+
+    Shape only — this says nothing about whether the residue is furniture.
+    Callers must confirm that against the recurring-line set; see
+    `_accepted_embedded_folio`.
+    """
+    stripped = line.strip()
+    if not stripped or _MARKER_NOT_A_RUNNING_HEAD_RE.match(stripped):
+        return []
+    if '|' in stripped:
+        return []
+    if _is_marker_folio(stripped):
+        return []          # a bare folio: the existing path already reads it
+    out = []
+    m = _MARKER_EMBEDDED_FOLIO_LEADING_RE.match(stripped)
+    if m and int(m.group(1)) >= 1 and _HAS_LETTER_RE.search(m.group(2)):
+        out.append((m.group(1), m.group(2).strip()))
+    m = _MARKER_EMBEDDED_FOLIO_TRAILING_RE.match(stripped)
+    if m and int(m.group(2)) >= 1 and _HAS_LETTER_RE.search(m.group(1)):
+        out.append((m.group(2), m.group(1).strip()))
+    return out
+
+
+def _accepted_embedded_folio(line, known):
+    """The folio in a running-head line, or None if the line is not one.
+
+    `known` is the recurring-furniture set for the band this line came from.
+    """
+    stripped = line.strip()
+    if stripped in known:
+        return None        # recurs verbatim: any number in it is constant
+    accepted = [folio for folio, residue in _embedded_folio_candidates(stripped)
+                if residue in known]
+    return accepted[0] if len(accepted) == 1 else None
+
 
 def _split_marker_pages(text):
     """Split paginated marker output into (page_index, page_text) pairs.
@@ -1237,6 +1318,13 @@ def _marker_recurring_lines(pages, from_end=False):
     mistaken for furniture, at the cost of leaving a head that genuinely
     appears twice — the safe direction to err, since a stray head in the body
     is visible while deleted body text is not.
+
+    Lines are counted twice over: verbatim, and with an edge numeral removed.
+    The second form is what lets a head that ALWAYS carries its folio
+    ("52 THE TAO OF COACHING", "MOTIVATING 67") be recognised at all — the
+    whole line never repeats, but the residue repeats on every page of the
+    book. Both forms land in one set; membership means "this string is
+    furniture", and the caller decides what to do with the numeral.
     """
     counts = collections.Counter()
     for _index, page in pages:
@@ -1247,6 +1335,8 @@ def _marker_recurring_lines(pages, from_end=False):
             # by shape, not by frequency.
             if stripped and not _is_marker_folio(stripped):
                 seen.add(stripped)
+                seen.update(residue for _folio, residue
+                            in _embedded_folio_candidates(stripped))
         counts.update(seen)
     return {line for line, n in counts.items() if n >= _MARKER_HEADER_MIN_REPEATS}
 
@@ -1264,8 +1354,15 @@ def _strip_marker_page_furniture(page_text, header_lines, footer_lines):
     therefore disagree — a folio may be captured and left in the body — and
     that is the safe direction: a stray number in the text is visible,
     whereas deleting a line that turned out to be prose is not.
+
+    A folio standing alone is preferred over one shared with a running head,
+    in both bands, before the shared-line rule is tried at all. That ordering
+    is what makes this change incapable of altering any book whose folios
+    already stand alone: on such a page the first pass has already returned.
     """
     lines = page_text.split('\n')
+    head_band = _band_lines(page_text)
+    foot_band = _band_lines(page_text, from_end=True)
 
     def first_folio(band):
         for line in band:
@@ -1273,14 +1370,27 @@ def _strip_marker_page_furniture(page_text, header_lines, footer_lines):
                 return line.strip()
         return None
 
-    folio = (first_folio(_band_lines(page_text))
-             or first_folio(_band_lines(page_text, from_end=True)))
+    def first_embedded_folio(band, known):
+        for line in band:
+            folio = _accepted_embedded_folio(line, known)
+            if folio:
+                return folio
+        return None
+
+    folio = (first_folio(head_band)
+             or first_folio(foot_band)
+             or first_embedded_folio(head_band, header_lines)
+             or first_embedded_folio(foot_band, footer_lines))
 
     def strippable(line, known):
         stripped = line.strip()
         if _MARKDOWN_HEADING_RE.match(stripped):
             return False
-        return _is_marker_folio(stripped) or stripped in known
+        if _is_marker_folio(stripped) or stripped in known:
+            return True
+        # A running head that carries its folio is furniture entire: the
+        # residue is known, so the line is recognised and goes with it.
+        return _accepted_embedded_folio(stripped, known) is not None
 
     start, consumed = 0, 0
     while start < len(lines) and consumed < _MARKER_HEADER_SCAN_LINES:

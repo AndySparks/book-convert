@@ -81,16 +81,57 @@ python convert.py input/MyBook.pdf --method docling          # IBM's layout-awar
 python convert.py input/ScannedBook.pdf --method ocr         # tesseract OCR
 ```
 
-### Extract figures and images
+### Figures and images
+
+Extraction is **on by default**. Figures, diagrams, and embedded raster
+images are written to a sibling directory (`output/<stem>_assets/` for
+pymupdf, `output/<stem>_images/` for marker and pymupdf4llm), and the
+markdown carries image references to them at the right page position.
 
 ```bash
-python convert.py input/MyBook.pdf --extract-images
+python convert.py input/MyBook.pdf                      # figures kept
+python convert.py input/MyBook.pdf --no-extract-images  # text only
 ```
 
-When `--extract-images` is set, the pymupdf backend renders figures,
-diagrams, and embedded raster images as PNGs in a sibling directory
-(`output/<stem>_assets/`) and inserts markdown image references into
-the body text at the right page position.
+**The invariant: the output never contains a reference to a file that does
+not exist.** With `--no-extract-images` the references to the skipped
+figures are *stripped*, not left dangling — a text-only conversion is
+complete, never perforated. Each stripped reference leaves an HTML comment
+(`<!-- bookconvert: image omitted, asset not extracted: ... -->`) so a thin
+conversion is diagnosable rather than silent, and the sidecar records
+`dangling_refs_stripped`.
+
+This is why extraction became the default. The old default found the
+figures, emitted references to them, and then threw the files away; a
+caller had to know a flag existed to avoid producing broken output. See
+`docs/asset-invariant.md`.
+
+### The asset manifest
+
+The sidecar carries an `assets` array — one entry per file the conversion
+wrote, with the references pointing at it:
+
+```json
+"assets": [
+  {
+    "path": "MyBook_images/_page_64_Figure_7.jpeg",
+    "bytes": 48213,
+    "references": [
+      {"target": "MyBook_images/_page_64_Figure_7.jpeg", "alt": "", "line": 812}
+    ]
+  }
+]
+```
+
+`path` is relative to the markdown file. A consumer relocating a conversion
+moves each `path` and rewrites each `references[].target` where it appears
+in a `](...)` — knowing nothing about how any backend names its files.
+Do not pattern-match `_page_N_Figure_M.jpeg`: that is marker's private
+convention and it can change without notice.
+
+```bash
+jq '.assets[] | .path, (.references | length)' output/MyBook.report.json
+```
 
 ### Page locators
 
@@ -212,8 +253,9 @@ Run `marker_single --help` for the full flag list.
 ### Sidecar conversion report
 
 Every conversion writes a `<stem>.report.json` alongside the markdown
-containing: method used, page count, OCR pages, extracted assets,
-quality score, `cleaned`/`cleanup` stats, table counts, and any warnings.
+containing: method used, page count, OCR pages, extracted assets, the
+asset manifest, `dangling_refs_stripped`, quality score,
+`cleaned`/`cleanup` stats, table counts, and any warnings.
 Useful for inspecting a batch run:
 
 ```bash
@@ -335,7 +377,7 @@ behind that feature.
 - **Use `--method pymupdf4llm`** if you have Python 3.10+ and want text plus extracted images in the markdown.
 - **Use `--method marker`** if you have Python 3.10+ and want the highest-quality markdown formatting.
 - **Use `--method docling`** if you have Python 3.10+ and need IBM's layout-aware pipeline for complex layouts.
-- **Use `--extract-images`** to pull figures and diagrams out as PNGs into an `_assets/` directory alongside the markdown.
+- **Figures come out by default.** Pass `--no-extract-images` for text-only output; the references to the skipped figures are stripped so the markdown never points at a file that isn't there.
 - **Use `--auto-ocr`** to have the tool automatically retry with OCR when pymupdf fails. This catches both fully-scanned PDFs and PDFs with non-standard font encodings that produce garbled text (e.g. ligature artifacts like `n1ethod` for `method`). Without `--auto-ocr` you'll get an error message suggesting `--method ocr` and can re-run manually.
 - **OCR output may need cleanup.** Claude Code can help you fix OCR artifacts, add proper headings, and improve formatting.
 - **Inspect the sidecar report** (`output/<stem>.report.json`) after each conversion to check quality score, OCR page count, and any warnings.

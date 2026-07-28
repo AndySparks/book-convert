@@ -144,6 +144,17 @@ as a page number a reader would trust. Every refusal is likewise reported
 in `warnings` with its reason, so low coverage always comes with an
 account of itself.
 
+A folio does not have to stand alone on its line to be read. Many editions
+set it on the same line as the running head, pinned to the outer edge of the
+spread — `52 THE TAO OF COACHING` on a verso, `MOTIVATING 67` on a recto. A
+numeral is lifted out of such a line only when it is the first or last token
+on it, when what remains is a running head already seen on three or more
+pages, and when the line as a whole does *not* repeat — a folio changes
+every page, so a band line that repeats verbatim has a constant number in it
+(a year in the title, a part or chapter number) and that number belongs to
+the title, not to the pagination. Roman numerals are never lifted out of a
+shared line. A folio standing alone always wins over one sharing a line.
+
 Check coverage after any conversion:
 
     jq '.page_numbering, .page_printed_coverage, .page_printed_offset_consistent' output/<Title>.report.json
@@ -381,13 +392,13 @@ Note that `ps aux | grep marker_single` returns **nothing** even while marker is
 
 ## Known limitations
 
-### Folio capture degrades when the page number sits beside a running head
+### Folio capture is still partial when the page number sits beside a running head
 
-Page-number capture reads a crop of each page's margins. It is reliable when the folio stands alone and unreliable when the folio shares its line with a running head — on one 136-page scan, capture succeeded almost exclusively on chapter openers and reached only 19 of 136 pages. Tracked in [#31](https://github.com/AndySparks/book-convert/issues/31).
+A folio sharing its line with a running head is now read (see *Page numbers* above), but only where the head beside it recurs on at least three pages. That bar is what keeps a line of prose from being mistaken for pagination, and it is paid for on short chapters: a book whose recto head is the *chapter* title, running two or three pages before the next chapter starts, loses those rectos. On Landsberg's *The Tao of Coaching* the versos all carry the book title and are read; the rectos carry chapter titles and roughly half fall under the bar. Capture on that scan goes from 19 of 136 to about 52 — enough to rest the offset on the whole body instead of on nine chapter openers, not enough to call the problem closed. Tracked in [#31](https://github.com/AndySparks/book-convert/issues/31).
 
 Two consequences worth knowing when you read a sidecar:
 
-- Low `page_printed_coverage` on a clean scan usually means this, not a source without printed page numbers.
+- Low `page_printed_coverage` on a clean scan usually means this, not a source without printed page numbers. What matters more than the coverage figure is `page_printed_offset_consistent`: with a consistent offset, the uncaptured pages are interpolated and get the same number they would have had.
 - **Folio position varies by edition, not just by page.** Some books run the number at the foot of every page; others at the top outer corner. There is no safe default — render both margin bands and look before concluding a source has no page numbers.
 
 ### EPUB has no pages

@@ -309,3 +309,234 @@ def build_minimal_epub(tmp_path: Path, name: str = "minimal.epub") -> Path:
         zf.writestr("OEBPS/toc.ncx", ncx)
         zf.writestr("OEBPS/ch1.xhtml", ch1)
     return out
+
+
+# --- configurable EPUB builder ------------------------------------------
+#
+# `build_minimal_epub` above is the one-chapter smoke fixture. The builder
+# below takes explicit content documents and an explicit nav so a test can
+# construct the exact structural shape it needs: semantic headings, no
+# headings but a good toc.ncx, an EPUB 3 nav document, chapter-ish CSS
+# classes, or nothing at all. All content is invented for the tests.
+
+_CONTAINER_XML = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<container version="1.0" '
+    'xmlns="urn:oasis:names:tc:opendocument:xmlns:container">\n'
+    '  <rootfiles>\n'
+    '    <rootfile full-path="OEBPS/content.opf" '
+    'media-type="application/oebps-package+xml"/>\n'
+    '  </rootfiles>\n'
+    '</container>\n'
+)
+
+
+def xhtml_doc(title: str, body: str) -> str:
+    """Wrap a body fragment in a minimal XHTML content document."""
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<html xmlns="http://www.w3.org/1999/xhtml" '
+        'xmlns:epub="http://www.idpf.org/2007/ops">\n'
+        '  <head><title>%s</title></head>\n'
+        '  <body>\n%s\n  </body>\n'
+        '</html>\n' % (title, body)
+    )
+
+
+def _nest(entries):
+    """Turn a flat [(depth, label, href), ...] list into a nested tree."""
+    root = []
+    stack = [(0, root)]
+    for depth, label, href in entries:
+        while stack and stack[-1][0] >= depth:
+            stack.pop()
+        children = []
+        stack[-1][1].append((label, href, children))
+        stack.append((depth, children))
+    return root
+
+
+def _ncx_points(tree, counter=None):
+    counter = counter if counter is not None else [0]
+    out = []
+    for label, href, children in tree:
+        counter[0] += 1
+        out.append(
+            '<navPoint id="np%d" playOrder="%d">'
+            '<navLabel><text>%s</text></navLabel>'
+            '<content src="%s"/>%s</navPoint>'
+            % (counter[0], counter[0], label, href,
+               "".join(_ncx_points(children, counter)))
+        )
+    return out
+
+
+def _nav_list(tree):
+    items = "".join(
+        '<li><a href="%s">%s</a>%s</li>'
+        % (href, label, _nav_list(children) if children else "")
+        for label, href, children in tree
+    )
+    return "<ol>%s</ol>" % items
+
+
+def build_epub(
+    tmp_path: Path,
+    docs,
+    nav=None,
+    nav_style: str = "ncx",
+    name: str = "synthetic.epub",
+    title: str = "Synthetic Book",
+    nav_in_spine: bool = False,
+) -> Path:
+    """Build an EPUB from explicit content documents and an explicit nav.
+
+    `docs` is a list of (filename, body markup) pairs, spine order.
+    `nav` is a flat list of (depth, label, href) where depth is 1-based
+    nesting and href is relative to OEBPS/ (may carry a `#anchor`).
+    `nav_style` is "ncx" (EPUB 2), "nav" (EPUB 3 nav document), or "none".
+    `nav_in_spine` puts the EPUB 3 nav document in the spine as a readable
+    contents page, which is what most real EPUB 3s do — and which is how the
+    nav's own `<h2>Contents</h2>` can masquerade as a semantic heading.
+    """
+    out = tmp_path / name
+    tree = _nest(nav or [])
+
+    manifest = [
+        '<item id="doc%d" href="%s" media-type="application/xhtml+xml"/>'
+        % (i, filename)
+        for i, (filename, _) in enumerate(docs)
+    ]
+    spine_items = ['<itemref idref="doc%d"/>' % i for i in range(len(docs))]
+    extra_files = {}
+    spine_attr = ""
+
+    if nav_style == "ncx":
+        manifest.append(
+            '<item id="ncx" href="toc.ncx" '
+            'media-type="application/x-dtbncx+xml"/>'
+        )
+        spine_attr = ' toc="ncx"'
+        extra_files["OEBPS/toc.ncx"] = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" '
+            'version="2005-1">\n'
+            '  <head><meta name="dtb:uid" content="urn:uuid:bc-test"/></head>\n'
+            '  <docTitle><text>%s</text></docTitle>\n'
+            '  <navMap>%s</navMap>\n'
+            '</ncx>\n' % (title, "".join(_ncx_points(tree)))
+        )
+    elif nav_style == "nav":
+        manifest.append(
+            '<item id="navdoc" href="nav.xhtml" properties="nav" '
+            'media-type="application/xhtml+xml"/>'
+        )
+        extra_files["OEBPS/nav.xhtml"] = xhtml_doc(
+            "Contents",
+            '<nav epub:type="toc" id="toc"><h2>Contents</h2>%s</nav>'
+            % _nav_list(tree),
+        )
+        if nav_in_spine:
+            spine_items.insert(0, '<itemref idref="navdoc"/>')
+
+    version = "3.0" if nav_style == "nav" else "2.0"
+    opf = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<package xmlns="http://www.idpf.org/2007/opf" version="%s" '
+        'unique-identifier="bookid">\n'
+        '  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">\n'
+        '    <dc:title>%s</dc:title>\n'
+        '    <dc:language>en</dc:language>\n'
+        '    <dc:identifier id="bookid">urn:uuid:bc-test</dc:identifier>\n'
+        '  </metadata>\n'
+        '  <manifest>%s</manifest>\n'
+        '  <spine%s>%s</spine>\n'
+        '</package>\n'
+        % (version, title, "".join(manifest), spine_attr,
+           "".join(spine_items))
+    )
+
+    with zipfile.ZipFile(out, "w") as zf:
+        zf.writestr(
+            zipfile.ZipInfo("mimetype"),
+            "application/epub+zip",
+            compress_type=zipfile.ZIP_STORED,
+        )
+        zf.writestr("META-INF/container.xml", _CONTAINER_XML)
+        zf.writestr("OEBPS/content.opf", opf)
+        for path, text in extra_files.items():
+            zf.writestr(path, text)
+        for filename, body in docs:
+            zf.writestr("OEBPS/" + filename, xhtml_doc(filename, body))
+    return out
+
+
+# Three canonical structural shapes, used across the heading-fallback tests.
+
+def build_semantic_epub(tmp_path: Path, name: str = "semantic.epub") -> Path:
+    """An EPUB that carries real `<h1>` chapter openers — the normal path."""
+    docs = [
+        ("ch1.xhtml",
+         '    <h1>The Opening Move</h1>\n'
+         '    <p>A manager decides what the team will not do.</p>'),
+        ("ch2.xhtml",
+         '    <h1>The Second Move</h1>\n'
+         '    <p>Then she tells them, in words they can repeat.</p>'),
+    ]
+    nav = [
+        (1, "The Opening Move", "ch1.xhtml"),
+        (1, "The Second Move", "ch2.xhtml"),
+    ]
+    return build_epub(tmp_path, docs, nav, "ncx", name=name)
+
+
+def build_navless_headingless_epub(
+    tmp_path: Path, name: str = "nav_only.epub", nav_style: str = "ncx"
+) -> Path:
+    """No `h1`-`h6` anywhere, but a complete and correct nav.
+
+    This is the Landsberg shape from issue #27: chapter openers styled as
+    `<p class="chaphead">`, with the real chapter list living only in the
+    navigation. Nesting is two-deep so heading depth can be checked.
+    """
+    docs = [
+        ("front.xhtml",
+         '    <p class="chaphead" id="intro">Introduction: A Broader Repertoire</p>\n'
+         '    <p>Most managers own one move and use it everywhere.</p>'),
+        ("part1.xhtml",
+         '    <p class="chaphead" id="part1">Part One: Foundations</p>\n'
+         '    <p>Two ideas do most of the work in this book.</p>\n'
+         '    <p class="chaphead" id="c1">Chapter 1: Attention</p>\n'
+         '    <p>Where a manager looks is where the team looks.</p>'),
+        ("part2.xhtml",
+         '    <p class="chaphead" id="c2">Chapter 2: Rhythm</p>\n'
+         '    <p>A weekly beat beats a quarterly heroic.</p>'),
+    ]
+    nav = [
+        (1, "Introduction: A Broader Repertoire", "front.xhtml#intro"),
+        (1, "Part One: Foundations", "part1.xhtml#part1"),
+        (2, "Chapter 1: Attention", "part1.xhtml#c1"),
+        (2, "Chapter 2: Rhythm", "part2.xhtml#c2"),
+    ]
+    return build_epub(tmp_path, docs, nav, nav_style, name=name)
+
+
+def build_structureless_epub(
+    tmp_path: Path, name: str = "flat.epub", chapterish: bool = False
+) -> Path:
+    """No headings and no usable nav — the worst case.
+
+    With `chapterish=True` the chapter openers still carry a recognizable
+    `class="chaphead"`, so the class heuristic has something to find; with
+    `chapterish=False` there is nothing to recover at all.
+    """
+    cls = ' class="chaphead"' if chapterish else ' class="bodytext"'
+    docs = [
+        ("ch1.xhtml",
+         '    <p%s>Chapter 1: The Flat Book</p>\n'
+         '    <p>Nothing here announces itself as a heading.</p>' % cls),
+        ("ch2.xhtml",
+         '    <p%s>Chapter 2: Still Flat</p>\n'
+         '    <p>Nor here. The nav is empty too.</p>' % cls),
+    ]
+    return build_epub(tmp_path, docs, nav=None, nav_style="none", name=name)

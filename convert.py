@@ -932,6 +932,15 @@ def _arabic_page_pdf_indices(page_printed_by_pdf_index):
     ]
 
 
+def _page_offset_samples(page_printed_by_pdf_index):
+    """dict of PDF page index -> implied offset, arabic samples only."""
+    return {
+        page_pdf: int(page_printed) - page_pdf
+        for page_pdf, page_printed in page_printed_by_pdf_index.items()
+        if _is_arabic_page_number(page_printed)
+    }
+
+
 def _derive_page_offset(page_printed_by_pdf_index):
     """Derive a constant page_pdf->page_printed offset from captured samples.
 
@@ -945,7 +954,8 @@ def _derive_page_offset(page_printed_by_pdf_index):
     Unanimity is not special-cased: a unanimous set is simply one with 100%
     agreement and no dissenters, so `_dominant_page_offset` returns it by
     the same path. Callers that need to know WHICH samples dissented use
-    `_page_offset_outliers`.
+    `_page_offset_outliers`; callers that need to know WHY a set was
+    refused use `_page_offset_refusal`.
 
     Args:
         page_printed_by_pdf_index: dict of PDF page index -> printed page
@@ -954,15 +964,30 @@ def _derive_page_offset(page_printed_by_pdf_index):
     Returns:
         (int | None, bool)
     """
-    by_index = {
-        page_pdf: int(page_printed) - page_pdf
-        for page_pdf, page_printed in page_printed_by_pdf_index.items()
-        if _is_arabic_page_number(page_printed)
-    }
-    if len(by_index) < 3:
+    by_index = _page_offset_samples(page_printed_by_pdf_index)
+    if len(by_index) < _OFFSET_MIN_SAMPLES:
         return (None, False)
-    dominant = _dominant_page_offset(by_index)
+    dominant, _ = _dominant_page_offset(by_index)
     return (dominant, True) if dominant is not None else (None, False)
+
+
+def _page_offset_refusal(page_printed_by_pdf_index):
+    """Why interpolation was refused, in one operator-readable clause.
+
+    Returns None when an offset WAS derived. The single worst failure mode
+    this module has shipped is a book emerging with 14% page coverage and an
+    empty `warnings` list: the operator sees a bad number and no account of
+    it, and cannot tell a sparse capture from a refused consensus. Every
+    refusal path here has a sentence attached for that reason.
+    """
+    by_index = _page_offset_samples(page_printed_by_pdf_index)
+    if len(by_index) < _OFFSET_MIN_SAMPLES:
+        return (
+            f"only {len(by_index)} arabic printed page number(s) were "
+            f"captured; {_OFFSET_MIN_SAMPLES} are needed to establish an offset"
+        )
+    _, reason = _dominant_page_offset(by_index)
+    return reason
 
 
 # A lone sample disagreeing with hundreds of others is an OCR misread of one
@@ -978,35 +1003,80 @@ def _derive_page_offset(page_printed_by_pdf_index):
 # RUN of samples at the new offset, never isolated singletons. That
 # distinction is what keeps this from silently flattening a real second
 # numbering sequence into a wrong one.
-# This threshold also sets the floor on sample size: any dissent at all
-# needs 20+ samples to stay above 0.95 (d/n <= 0.05), so a separate
-# minimum-samples guard would be unreachable and is deliberately absent
-# rather than sitting here implying protection it never provides.
-_OFFSET_CONSENSUS_MIN_AGREEMENT = 0.95
+#
+# The agreement bar was 0.95, which made any dissent at all require 20+
+# samples. A home scan captures folios sparsely — the folio usually sits
+# beside a running head and is read as part of it — so 20 samples is a bar
+# a whole class of real books cannot clear. Landsberg's Tao of Coaching
+# captured 18 folios; 17 agreed on -9 across the entire body and the
+# eighteenth was a numbered-list item lifted off an appendix opener. At
+# 0.95 that book (94.4% agreement) was refused and shipped with 14%
+# coverage and no printed page numbers at all.
+#
+# 0.85 is chosen over the 0.80 first cut proposed in issue #28 because 0.80
+# admits a case this module already refuses on purpose: 7 scattered
+# dissenters in 40 samples (82.5%) that all land on the SAME alternative
+# offset. That is a competing numbering hypothesis, not seven independent
+# misreads, and the run guard cannot catch it because the dissenters are
+# spread out. 0.85 is the loosest bar that admits Landsberg while keeping
+# every disagreement pattern the existing tests pin down.
+_OFFSET_CONSENSUS_MIN_AGREEMENT = 0.85
+# Below this many samples, unanimity is required. At 0.95 a minimum-samples
+# guard was unreachable (the ratio always bit first) and was deliberately
+# left out; at 0.85 it bites, and it should: a 6-to-1 split is not a
+# consensus with an outlier, it is a small sample where a genuine second
+# sequence and an OCR misread are indistinguishable.
+_OFFSET_DISSENT_MIN_SAMPLES = 8
+# Fewer than this many arabic samples and no offset is derived at all.
+_OFFSET_MIN_SAMPLES = 3
 # Two dissenters within this many sheets of each other count as a run.
 _OFFSET_DISSENT_RUN_GAP = 2
 
 
 def _dominant_page_offset(offset_by_pdf_index):
-    """Return the consensus offset, or None if the disagreement is real.
+    """Return (consensus offset, refusal reason).
+
+    Exactly one of the two is None: an adopted offset carries no reason, a
+    refusal carries no offset. The reason exists so callers can tell the
+    operator WHY a book lost its page numbering instead of leaving an empty
+    `warnings` list next to bad coverage.
 
     Args:
         offset_by_pdf_index: dict of PDF page index -> (printed - pdf)
 
     Returns:
-        int | None
+        (int | None, str | None)
     """
     counts = collections.Counter(offset_by_pdf_index.values())
     dominant, agreeing = counts.most_common(1)[0]
     total = len(offset_by_pdf_index)
+    dissenting = total - agreeing
     if agreeing / total < _OFFSET_CONSENSUS_MIN_AGREEMENT:
-        return None
+        return (None, (
+            f"the best-supported offset {dominant:+d} is carried by only "
+            f"{agreeing} of {total} captured folios "
+            f"({agreeing / total:.0%}, below the "
+            f"{_OFFSET_CONSENSUS_MIN_AGREEMENT:.0%} consensus bar), so the "
+            f"disagreement is too broad to be OCR noise"
+        ))
+    if dissenting and total < _OFFSET_DISSENT_MIN_SAMPLES:
+        return (None, (
+            f"{agreeing} of {total} captured folios agree on offset "
+            f"{dominant:+d}, but under {_OFFSET_DISSENT_MIN_SAMPLES} samples "
+            f"a dissenting folio cannot be told apart from a second "
+            f"numbering sequence, so unanimity is required"
+        ))
     dissenters = sorted(i for i, o in offset_by_pdf_index.items() if o != dominant)
     # Any two dissenters close together are a numbering change, not noise.
     for earlier, later in zip(dissenters, dissenters[1:]):
         if later - earlier <= _OFFSET_DISSENT_RUN_GAP:
-            return None
-    return dominant
+            return (None, (
+                f"pdf pages {earlier} and {later} both disagree with offset "
+                f"{dominant:+d} and are within {_OFFSET_DISSENT_RUN_GAP} "
+                f"sheets of each other; adjacent dissent is the signature of "
+                f"a renumbering or a page-order defect, not an OCR misread"
+            ))
+    return (dominant, None)
 
 
 def _page_offset_outliers(page_printed_by_pdf_index, offset):
@@ -2745,6 +2815,29 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=False):
         for page_pdf, _, page_printed in cleaned_pages if page_printed
     }
     page_printed_offset, page_printed_offset_consistent = _derive_page_offset(page_printed_by_pdf_index)
+    # Captured-but-contradicting folios are misreads, exactly as on the
+    # marker path. Drop them so interpolation supplies the right number
+    # instead of publishing a corrupted one with full confidence, and so
+    # the span below is not stretched by a corrupted sample.
+    misread_pdf_indices = _page_offset_outliers(
+        page_printed_by_pdf_index,
+        page_printed_offset if page_printed_offset_consistent else None,
+    )
+    for page_pdf in sorted(misread_pdf_indices):
+        report.warnings.append(
+            f"page_pdf={page_pdf}: captured printed page "
+            f"'{page_printed_by_pdf_index[page_pdf]}' contradicts the book's "
+            f"offset {page_printed_offset:+d}; treated as an OCR misread and "
+            f"replaced by the interpolated value"
+        )
+        del page_printed_by_pdf_index[page_pdf]
+    if not page_printed_offset_consistent and page_printed_by_pdf_index:
+        report.warnings.append(
+            "no page_pdf->page_printed offset could be established: "
+            + (_page_offset_refusal(page_printed_by_pdf_index) or "")
+            + "; pages without a captured printed page number were left "
+            "addressable by pdf page only"
+        )
     # Interpolation is permitted only BETWEEN captured samples. Outside that
     # span there is no evidence the offset still holds — endnotes or a second
     # numbering sequence past the last sample contribute no samples, so they
@@ -2823,6 +2916,8 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=False):
                 skipped_toc_pages += 1
                 log.debug("Skipping broken TOC page %d", page_num)
                 continue
+            # A misread folio must not be emitted OR counted as captured.
+            page_printed = page_printed_by_pdf_index.get(page_num)
             effective_page_printed = page_printed
             if (effective_page_printed is None
                     and page_printed_offset_consistent
@@ -2945,7 +3040,7 @@ def _rewrite_marker_page_locators(target, report):
     # interpolation can supply the right number, and so the span below is
     # not stretched by a corrupted sample.
     misread = _page_offset_outliers(page_printed_by_index, offset if offset_consistent else None)
-    for index in misread:
+    for index in sorted(misread):
         report.warnings.append(
             f"page_pdf={index}: captured printed page "
             f"'{page_printed_by_index[index]}' contradicts the book's "
@@ -2953,6 +3048,14 @@ def _rewrite_marker_page_locators(target, report):
             f"by the interpolated value"
         )
         del page_printed_by_index[index]
+
+    if not offset_consistent and page_printed_by_index:
+        report.warnings.append(
+            "no page_pdf->page_printed offset could be established: "
+            + (_page_offset_refusal(page_printed_by_index) or "")
+            + "; pages without a captured printed page number were left "
+            "addressable by pdf page only"
+        )
 
     arabic = _arabic_page_pdf_indices(page_printed_by_index)
     span = (min(arabic), max(arabic)) if arabic else None

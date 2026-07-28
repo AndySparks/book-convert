@@ -268,6 +268,14 @@ def test_renumbering_book_gets_no_interpolation_in_markdown(tmp_path):
     # numbering runs we must emit `none`, never a guess.
     assert "<!-- page_pdf=12 page_printed=none -->" in md
     assert "<!-- page_pdf=14 page_printed=none -->" in md
+    # A refusal must never be silent. Shipping 14% coverage with an empty
+    # warnings list is what sent issue #28 to a human to diagnose by hand.
+    # The two runs are 6 samples each, so this refuses on the agreement bar
+    # (the run guard never gets a chance) — and says which bar it hit.
+    refusals = [w for w in report.warnings if "no page_pdf->page_printed offset" in w]
+    assert len(refusals) == 1
+    assert "consensus bar" in refusals[0]
+    assert "6 of 12" in refusals[0]
     # PDF pages 1-2 carry no printed number at all and stay `none`.
     assert "<!-- page_pdf=1 page_printed=none -->" in md
     assert "<!-- page_pdf=2 page_printed=none -->" in md
@@ -589,3 +597,38 @@ def test_convert_book_epub_route_produces_a_sidecar(tmp_path):
     # Cleanup is deliberately skipped on the epub route (it repairs PDF
     # extraction artifacts), so the sidecar must not claim it ran.
     assert not data.get("cleaned")
+
+
+def test_misread_folio_is_suppressed_and_warned_in_markdown(tmp_path):
+    """A captured-but-wrong folio must not be published on the pymupdf path.
+
+    A captured printed number is normally the most trustworthy address the
+    converter has, so a corrupted one goes out with full confidence and a
+    reader cannot tell. Consensus lets interpolation supply the truth
+    instead — and the operator is told which page was overruled.
+    """
+    import convert
+    from tests import fixtures
+
+    # PDF pages 5-20 print 1-16 (offset -4). Page 12 prints "99" instead of 8,
+    # standing in for a body numeral lifted off an appendix opener.
+    pdf = fixtures.build_page_printed_pdf(
+        tmp_path, pages=20, offset=-4, misread_page_printed_on={12: "99"}
+    )
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    report = convert.convert_with_pymupdf(pdf, out_dir)
+    md = (out_dir / f"{pdf.stem}.md").read_text(encoding="utf-8")
+
+    # 15 of 16 samples agree on -4; the sixteenth is scattered, so it loses.
+    assert report.page_printed_offset == -4
+    assert report.page_printed_offset_consistent is True
+    assert "<!-- page_pdf=12 page_printed=8 -->" in md
+    assert "page_printed=99" not in md
+    # The suppressed capture is not counted as captured.
+    assert report.page_printed_count == 15
+
+    misread = [w for w in report.warnings if "page_pdf=12" in w]
+    assert len(misread) == 1
+    assert "'99'" in misread[0]
+    assert "OCR misread" in misread[0]

@@ -53,6 +53,7 @@ def build_page_printed_pdf(
     offset: int = -4,
     skip_page_printed_on: tuple = (),
     body_only_footer_on: tuple = (),
+    misread_page_printed_on: dict = None,
     name: str = "page_printed.pdf",
 ) -> Path:
     """Build a PDF whose pages carry a printed page number in the footer.
@@ -74,17 +75,25 @@ def build_page_printed_pdf(
     After header stripping those pages clean to nothing and are dropped
     before a locator is emitted, so they must not count toward the
     page_printed_coverage denominator.
+
+    `misread_page_printed_on` maps a PDF page to the WRONG string printed
+    in its footer — a digit OCR'd badly, or a body numeral lifted off an
+    appendix opener. Those pages are captured with full confidence and are
+    the ones the consensus rule must suppress rather than publish.
     """
     out = tmp_path / name
     doc = fitz.open()
     skip = set(skip_page_printed_on)
     footer_only = set(body_only_footer_on)
+    misread = dict(misread_page_printed_on or {})
     for i in range(1, pages + 1):
         page = doc.new_page(width=612, height=792)
         if i not in footer_only:
             page.insert_text((72, 100), f"Body text for page {i}.")
         page_printed = i + offset
-        if page_printed >= 1 and i not in skip:
+        if i in misread:
+            page.insert_text((300, 740), str(misread[i]))
+        elif page_printed >= 1 and i not in skip:
             page.insert_text((300, 740), str(page_printed))
     doc.save(str(out))
     doc.close()

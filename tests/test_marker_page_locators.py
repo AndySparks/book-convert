@@ -330,14 +330,31 @@ def test_weak_agreement_refuses():
     assert convert._derive_page_offset(s) == (None, False)
 
 
-def test_small_non_unanimous_sample_sets_cannot_reach_consensus():
-    """Below 20 samples any dissent drops agreement under the threshold, so
-    the original strict rule still governs small books. Documented as a
-    property rather than a separate guard, because a minimum-samples check
-    would be unreachable."""
-    for n in (5, 10, 19):
+def test_tiny_sample_sets_still_require_unanimity():
+    """Under _OFFSET_DISSENT_MIN_SAMPLES, one dissenter still refuses.
+
+    A 6-to-1 split is not a consensus with an outlier; at that size a real
+    second numbering sequence and an OCR misread look identical, so the
+    strict rule still governs small books.
+    """
+    for n in range(3, convert._OFFSET_DISSENT_MIN_SAMPLES):
         s = samples(-15, range(20, 20 + n), {21: 999})
         assert convert._derive_page_offset(s) == (None, False), n
+        assert convert._page_offset_refusal(s), n
+    # At n=7 the ratio alone would have passed (6/7 = 86%); the
+    # minimum-samples guard is what refuses, and it says so. Below 7 the
+    # ratio bites first, which is why this asserts one size, not the range.
+    s = samples(-15, range(20, 27), {21: 999})
+    assert "unanimity is required" in convert._page_offset_refusal(s)
+
+
+def test_dissent_is_tolerated_at_and_above_the_minimum_sample_size():
+    """One sheet above the floor, an isolated misread stops blocking."""
+    n = convert._OFFSET_DISSENT_MIN_SAMPLES
+    s = samples(-15, range(20, 20 + n), {21: 999})
+    assert convert._derive_page_offset(s) == (-15, True)
+    assert convert._page_offset_outliers(s, -15) == {21}
+    assert convert._page_offset_refusal(s) is None
 
 
 def test_unanimous_samples_are_unaffected():
@@ -349,6 +366,135 @@ def test_unanimous_samples_are_unaffected():
 def test_outliers_are_empty_when_no_offset_was_derived():
     s = samples(-15, range(20, 60), {54: 30, 55: 31})
     assert convert._page_offset_outliers(s, None) == set()
+
+
+# --- Landsberg, The Tao of Coaching (issue #28) -----------------------------
+#
+# A 136-sheet home scan. 18 folios captured; 17 agree on offset -9 across
+# sheets 26->134 — the whole body. The eighteenth reads `pdf 115 -> printed
+# 2`: sheet 115 is headed "Appendix 1" above a numbered list, and the
+# capture lifted a list numeral. Sheet 115 really prints page 106.
+#
+# 17/18 is 94.4% agreement. Under the old 0.95 bar that book was refused,
+# shipping page_printed_coverage 0.1397, offset null — and warnings [], so
+# nothing told the operator why. That empty list is the part of the old
+# behaviour this section exists to keep dead.
+
+# 17 agreeing sheets spread across the body, none within the run gap of 115.
+LANDSBERG_AGREEING = [26, 32, 40, 48, 55, 62, 68, 75, 82, 89,
+                      95, 102, 108, 120, 126, 130, 134]
+LANDSBERG_OFFSET = -9
+LANDSBERG_MISREAD_SHEET = 115
+
+
+def landsberg_samples():
+    s = samples(LANDSBERG_OFFSET, LANDSBERG_AGREEING)
+    s[LANDSBERG_MISREAD_SHEET] = "2"        # really prints 106
+    return s
+
+
+def test_landsberg_single_scattered_outlier_reaches_consensus():
+    s = landsberg_samples()
+    assert len(s) == 18
+    assert convert._derive_page_offset(s) == (LANDSBERG_OFFSET, True)
+    assert convert._page_offset_outliers(s, LANDSBERG_OFFSET) == {
+        LANDSBERG_MISREAD_SHEET
+    }
+    assert convert._page_offset_refusal(s) is None
+
+
+def landsberg_marker_text():
+    """Sheets 26-134, folios on the 18 captured pages and nowhere else."""
+    captured = landsberg_samples()
+    return "".join(
+        marker_page(sheet, "The Tao Of Coaching", *(
+            [captured[sheet]] if sheet in captured else []
+        ), f"Body of sheet {sheet}.")
+        for sheet in range(26, 135)
+    )
+
+
+def test_landsberg_interpolates_and_warns_about_the_misread(tmp_path):
+    """End to end: the book gets its page numbering, and says what it dropped."""
+    out, report = _rewrite(tmp_path, landsberg_marker_text())
+
+    assert report.page_printed_offset == LANDSBERG_OFFSET
+    assert report.page_printed_offset_consistent is True
+    # The misread is replaced by the interpolated truth, not published.
+    assert "<!-- page_pdf=115 page_printed=106 -->" in out
+    assert "<!-- page_pdf=115 page_printed=2 -->" not in out
+    # Sheets between samples that captured nothing get an address.
+    assert "<!-- page_pdf=27 page_printed=18 -->" in out
+    assert "<!-- page_pdf=133 page_printed=124 -->" in out
+    # Only the 17 surviving captures count as captured; coverage is the
+    # whole span, not the 14% the old rule shipped.
+    assert report.page_printed_count == len(LANDSBERG_AGREEING)
+    assert report.page_locator_count == 109
+    assert report.page_numbering == "printed"
+
+    misread_warnings = [w for w in report.warnings if "page_pdf=115" in w]
+    assert len(misread_warnings) == 1
+    assert "OCR misread" in misread_warnings[0]
+    assert "offset -9" in misread_warnings[0]
+
+
+# --- refusals must always say why ------------------------------------------
+
+
+def test_ambiguous_split_refuses_and_warns(tmp_path):
+    """A 50/50 split between two offsets is not a consensus with outliers.
+
+    Neither offset can claim the book, so nothing is interpolated — and the
+    operator is told that rather than left with an empty warnings list.
+    """
+    s = samples(-9, range(20, 44, 2))               # 12 samples, offset -9
+    for sheet in range(20, 44, 4):                  # 6 of them, offset -20
+        s[sheet] = str(sheet - 20)
+    assert len(s) == 12
+    assert convert._derive_page_offset(s) == (None, False)
+    reason = convert._page_offset_refusal(s)
+    assert "consensus bar" in reason
+    assert "6 of 12" in reason
+
+    text = "".join(
+        marker_page(sheet, "Running Head", *([s[sheet]] if sheet in s else []),
+                    f"Body of sheet {sheet}.")
+        for sheet in range(20, 44)
+    )
+    _, report = _rewrite(tmp_path, text)
+    assert report.page_printed_offset_consistent is False
+    assert report.page_printed_offset is None
+    refusals = [w for w in report.warnings if "no page_pdf->page_printed offset" in w]
+    assert len(refusals) == 1
+    assert "consensus bar" in refusals[0]
+
+
+def test_contiguous_run_refuses_and_names_the_adjacent_sheets(tmp_path):
+    """The regression guard, now audible.
+
+    A duplex-ADF fault once transposed sixteen sheets of another book in
+    adjacent pairs. Adjacent dissent must keep blocking interpolation — and
+    must say which sheets triggered it, so the operator can go look.
+    """
+    s = samples(-15, range(20, 60), {54: 30, 55: 31})
+    assert convert._derive_page_offset(s) == (None, False)
+    reason = convert._page_offset_refusal(s)
+    assert "54" in reason and "55" in reason
+    assert "renumbering or a page-order defect" in reason
+
+    text = "".join(
+        marker_page(sheet, "Running Head", *([s[sheet]] if sheet in s else []),
+                    f"Body of sheet {sheet}.")
+        for sheet in range(20, 60)
+    )
+    out, report = _rewrite(tmp_path, text)
+    assert report.page_printed_offset_consistent is False
+    # Nothing is interpolated: sheet 54's neighbours captured 39 and 41, and
+    # the gap between them must NOT be filled in.
+    assert "<!-- page_pdf=54 page_printed=30 -->" in out
+    refusals = [w for w in report.warnings if "no page_pdf->page_printed offset" in w]
+    assert len(refusals) == 1
+    assert "renumbering or a page-order defect" in refusals[0]
 
 
 # --- flag plumbing ---------------------------------------------------------

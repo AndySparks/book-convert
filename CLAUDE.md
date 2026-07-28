@@ -19,10 +19,10 @@ The marginal cost of completeness is near zero with AI. Do the whole thing. Do i
 5. `--method marker` (Python 3.10+, use `.venv-marker`) — highest quality, slowest
 6. `--method docling` (Python 3.10+, use `.venv-marker`) — IBM's layout-aware pipeline
 7. `--method ocr` or `--ocr` — tesseract OCR for scanned/image-based PDFs
-8. EPUB files always route through pandoc regardless of `--method`
+8. EPUB files always route through pandoc regardless of `--method`. If the epub carries no semantic `h1`–`h6`, `epub_structure.py` derives headings from the book's own nav (`toc.ncx` / EPUB 3 nav doc), falling back to a chapter-ish CSS-class heuristic, and hands pandoc a rewritten copy from a temp dir (the source is never modified). The sidecar always declares `heading_source` (`semantic` | `nav` | `class-heuristic` | `none`) and `headings_emitted`
 9. Add `--extract-images` (pymupdf backend only) to render figures, diagrams, and raster images as PNGs in a sibling `<stem>_assets/` dir with inline markdown references
 10. A verbatim-safe **cleanup pass runs by default** on every conversion (`cleanup.py`): it de-joins dropped-space function-word joins ("thefrozen" -> "the frozen"), fixes stray-consonant citation ghosts ("—wWilliam" -> "—William"), and unwraps picture-text TOC tables while dropping OCR garble blocks. Pass `--no-clean` to skip it. The de-join needs `pyspellchecker` (in `requirements.txt`) and degrades gracefully if absent (dictionary-free repairs still run; a warning is recorded).
-11. Every conversion writes a `<stem>.report.json` sidecar: method, page counts, OCR pages, extracted assets, quality score, `cleaned`/`cleanup` stats, warnings
+11. Every conversion writes a `<stem>.report.json` sidecar: method, page counts, OCR pages, extracted assets, quality score, `cleaned`/`cleanup` stats, heading signals (EPUB), warnings
 12. Converted markdown files appear in `output/`
 
 ## When helping users

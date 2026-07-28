@@ -211,6 +211,28 @@ Note that the `ocr` (tesseract) backend has **no** table reconstruction
 at all, so it reports `0` emitted against however many captions it read.
 For a book with real tables, use `marker`.
 
+**Heading fidelity (EPUB).** `headings_emitted` counts markdown headings in
+the converted body — BookConvert's own title line is excluded, so `0` means
+`0`. `heading_source` says where they came from:
+
+| `heading_source` | Meaning |
+|---|---|
+| `semantic` | The epub carried real `<h1>`–`<h6>` tags. The normal case. |
+| `nav` | The epub had none; headings were derived from `toc.ncx` / the EPUB 3 nav document. Authoritative and ordered. |
+| `class-heuristic` | No headings *and* no usable nav; derived from chapter-ish CSS classes (`<p class="chaphead">`). Lower confidence — spot-check it. |
+| `none` | No signal at all. The output has no structural addressing whatsoever. |
+
+Both fields are `null` on the PDF backends, which do not measure them.
+`null` means "not measured", which is a different claim from `0`.
+
+```bash
+jq '.heading_source, .headings_emitted' output/*.report.json
+```
+
+This matters more for EPUB than for PDF: an epub is reflowable, so
+`page_numbering` is always `none` and headings are the *only* address the
+file has. `heading_source: "none"` on an epub means you have a text blob.
+
 ### Archive source PDFs after conversion
 
 ```bash
@@ -245,6 +267,20 @@ python convert.py input/MyBook.pdf --output output/Philosophy/
 ### EPUB conversion
 
 EPUBs go through pandoc with raw HTML disabled, which gives you clean chapter headings, preserved emphasis, and usable footnote anchors without the publisher layout scaffolding leaking into the output. The `--method` flag is PDF-only; EPUBs always use pandoc. Install with `brew install pandoc`.
+
+**Headings when the epub has none.** Pandoc can only map headings the source
+actually carries, and plenty of trade epubs style their chapter openers as
+`<p class="chaphead">` rather than `<h1>`. Those books used to convert to a
+single flat document with no warning — and because an epub is reflowable,
+that leaves the file with no addressing of any kind. BookConvert now checks
+for semantic `h1`–`h6` first and, finding none, derives headings from the
+epub's own navigation (`toc.ncx` for EPUB 2, the nav document for EPUB 3),
+mapping nav nesting to heading depth. A chapter-ish CSS-class heuristic is
+the fallback to the fallback. The source file is never modified; a rewritten
+copy is handed to pandoc from a temp directory. Whatever happened is
+declared in the sidecar as `heading_source` + `headings_emitted` — see
+[Sidecar conversion report](#sidecar-conversion-report). Implementation:
+`epub_structure.py`.
 
 ### Academic papers
 

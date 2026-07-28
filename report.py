@@ -49,6 +49,19 @@ class ConversionReport:
     page_printed_coverage: float = 0.0
     page_printed_offset: int | None = None
     page_printed_offset_consistent: bool = False
+    # Heading signals. EPUB is reflowable, so `page_numbering` is always
+    # "none" and headings are the *only* addressability an epub has — which
+    # makes a structureless conversion otherwise indistinguishable from a
+    # good one. `headings_emitted` counts markdown headings in the converted
+    # body (excluding BookConvert's own title line); `heading_source`
+    # declares where they came from: "semantic" (the epub carried real
+    # h1-h6), "nav" (derived from toc.ncx / the EPUB 3 nav document),
+    # "class-heuristic" (derived from chapter-ish CSS classes, lower
+    # confidence), or "none". Both stay None on backends that do not measure
+    # them (every PDF path today) — None means "not measured", which is a
+    # different claim from 0.
+    headings_emitted: int | None = None
+    heading_source: str | None = None
     warnings: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:

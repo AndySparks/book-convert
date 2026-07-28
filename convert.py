@@ -9,7 +9,9 @@ PDF conversion methods:
 
 EPUB conversion: routed through pandoc, which preserves the epub's chapter
 structure as markdown headings. The --method flag only applies to PDFs; epubs
-always use pandoc.
+always use pandoc. EPUBs that carry no semantic h1-h6 get their headings
+derived from the book's own navigation first (see epub_structure.py); the
+sidecar always declares `heading_source` and `headings_emitted`.
 
 Usage:
     python convert.py input/MyBook.pdf
@@ -42,6 +44,7 @@ log = logging.getLogger("bookconvert")
 from report import ConversionReport, write_report
 import assets
 import cleanup
+import epub_structure
 
 
 class DependencyError(Exception):
@@ -3385,6 +3388,17 @@ def convert_with_pandoc(book_path, output_dir):
     Returns a ConversionReport and writes the sidecar, like every other
     backend; its `page_numbering` is always "none" because an epub is
     reflowable and has no pages to address.
+
+    Because there are no page locators, headings are the only addressing an
+    epub has — and pandoc can only map headings the source actually carries.
+    EPUBs whose chapter openers are styled `<p>` rather than `<h*>` used to
+    convert to one flat document with no warning. We now check for semantic
+    headings first and, when there are none, hand pandoc a rewritten copy
+    with headings derived from the book's own navigation (see
+    `epub_structure.py`). The sidecar always declares `heading_source` and
+    `headings_emitted` so a structureless conversion is visible at
+    conversion time instead of at filing time.
+
     Raises ConversionError on failure.
     """
     print(f"Converting with pandoc: {book_path.name}")
@@ -3398,30 +3412,48 @@ def convert_with_pandoc(book_path, output_dir):
         tmp_path = Path(tmp.name)
 
     try:
-        # `gfm-raw_html` keeps gfm's nice heading/list/emphasis handling
-        # but drops raw HTML passthrough. Many epubs embed publisher
-        # `<span>`/`<div>`/`<img>` layout scaffolding that pandoc would
-        # otherwise preserve verbatim; disabling raw_html makes pandoc
-        # flatten those tags to their text content instead.
-        result = subprocess.run(
-            [
-                "pandoc",
-                "--from=epub",
-                "--to=gfm-raw_html",
-                "--wrap=none",
-                str(book_path),
-                "-o",
-                str(tmp_path),
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise ConversionError(
-                f"pandoc error: {result.stderr.strip() or 'unknown failure'}"
-            )
+        with tempfile.TemporaryDirectory(prefix="bookconvert-epub-") as work:
+            try:
+                convert_path, heading_source, injected = (
+                    epub_structure.prepare_epub(book_path, Path(work))
+                )
+            except Exception as exc:      # never lose a book to this analysis
+                log.warning("epub heading analysis failed: %s", exc)
+                convert_path, heading_source, injected = (
+                    book_path, epub_structure.SOURCE_NONE, 0
+                )
+            if heading_source == epub_structure.SOURCE_NAV:
+                print(f"  no semantic headings; derived {injected} from the epub nav")
+            elif heading_source == epub_structure.SOURCE_CLASS:
+                print(
+                    f"  no semantic headings or nav; derived {injected} from "
+                    "chapter-ish CSS classes"
+                )
 
-        body = tmp_path.read_text(encoding="utf-8")
+            # `gfm-raw_html` keeps gfm's nice heading/list/emphasis handling
+            # but drops raw HTML passthrough. Many epubs embed publisher
+            # `<span>`/`<div>`/`<img>` layout scaffolding that pandoc would
+            # otherwise preserve verbatim; disabling raw_html makes pandoc
+            # flatten those tags to their text content instead.
+            result = subprocess.run(
+                [
+                    "pandoc",
+                    "--from=epub",
+                    "--to=gfm-raw_html",
+                    "--wrap=none",
+                    str(convert_path),
+                    "-o",
+                    str(tmp_path),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                raise ConversionError(
+                    f"pandoc error: {result.stderr.strip() or 'unknown failure'}"
+                )
+
+            body = tmp_path.read_text(encoding="utf-8")
     finally:
         tmp_path.unlink(missing_ok=True)
 
@@ -3453,6 +3485,29 @@ def convert_with_pandoc(book_path, output_dir):
         output=str(output_file),
         method="pandoc",
     )
+    # Count headings in the converted body only. BookConvert's own `# Title`
+    # line is chrome, not structure: counting it would report "1 heading" for
+    # exactly the flat-document failure this signal exists to expose.
+    report.headings_emitted = epub_structure.count_markdown_headings(body)
+    # We only report "none" when we injected nothing. If headings turned up
+    # anyway, they came from the source — which means our spine analysis
+    # missed them (an exotic container, say), not that the book is flat.
+    # Saying "none" over a structured output would be the same silent lie
+    # this signal exists to prevent, in the other direction.
+    if (heading_source == epub_structure.SOURCE_NONE
+            and report.headings_emitted):
+        heading_source = epub_structure.SOURCE_SEMANTIC
+    report.heading_source = heading_source
+    if heading_source != epub_structure.SOURCE_SEMANTIC:
+        report.warnings.append(
+            "epub exposes no semantic h1-h6 headings; heading_source="
+            f"{heading_source}"
+        )
+    if not report.headings_emitted:
+        report.warnings.append(
+            "no headings in output: an epub has no page locators, so this "
+            "conversion has no structural addressing of any kind"
+        )
     _apply_backend_page_numbering(report)
     write_report(output_file.with_suffix(".report.json"), report)
     return report

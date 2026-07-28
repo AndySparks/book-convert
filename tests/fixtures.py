@@ -261,7 +261,7 @@ def build_minimal_epub(tmp_path: Path, name: str = "minimal.epub") -> Path:
         '  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">\n'
         '    <dc:title>Minimal Book</dc:title>\n'
         '    <dc:language>en</dc:language>\n'
-        '    <dc:identifier id="bookid">urn:uuid:bookconvert-test</dc:identifier>\n'
+        '    <dc:identifier id="bookid">urn:uuid:sourceconvert-test</dc:identifier>\n'
         '  </metadata>\n'
         '  <manifest>\n'
         '    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>\n'
@@ -276,7 +276,7 @@ def build_minimal_epub(tmp_path: Path, name: str = "minimal.epub") -> Path:
     ncx = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">\n'
-        '  <head><meta name="dtb:uid" content="urn:uuid:bookconvert-test"/></head>\n'
+        '  <head><meta name="dtb:uid" content="urn:uuid:sourceconvert-test"/></head>\n'
         '  <docTitle><text>Minimal Book</text></docTitle>\n'
         '  <navMap>\n'
         '    <navPoint id="np1" playOrder="1">\n'
@@ -647,7 +647,7 @@ def build_figure_epub(tmp_path: Path, name: str = "figure.epub") -> Path:
     """An EPUB whose chapters carry `<img>` tags with alt text.
 
     Pandoc turns these into markdown image references pointing at the epub's
-    internal media paths — for images BookConvert never writes out. Alt text
+    internal media paths — for images sourceconvert never writes out. Alt text
     matters: `_clean_pandoc_output` already drops empty-alt references on
     their own line, so an alt-bearing image is the one that survives to
     dangle. This is the epub half of issue #34.

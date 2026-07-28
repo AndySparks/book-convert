@@ -1,6 +1,6 @@
 """Tests for the concurrent-conversion registry.
 
-One BookConvert checkout is shared by several agent sessions. The realistic
+One sourceconvert checkout is shared by several agent sessions. The realistic
 collision is one workspace running a two-hour OCR of a scanned book while
 another converts a few papers for an unrelated project — both should proceed,
 neither should be surprised.

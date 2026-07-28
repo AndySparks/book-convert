@@ -1,4 +1,4 @@
-# BookConvert
+# sourceconvert
 
 Convert PDF and EPUB books to clean Markdown files for use in [Claude Projects](https://claude.ai), NotebookLM, and other LLM tools.
 
@@ -15,8 +15,8 @@ Conversion paths:
 ### Default install (text-only extraction)
 
 ```bash
-git clone https://github.com/AndySparks/book-convert.git
-cd book-convert
+git clone https://github.com/AndySparks/sourceconvert.git
+cd sourceconvert
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -97,7 +97,7 @@ python convert.py input/MyBook.pdf --no-extract-images  # text only
 not exist.** With `--no-extract-images` the references to the skipped
 figures are *stripped*, not left dangling — a text-only conversion is
 complete, never perforated. Each stripped reference leaves an HTML comment
-(`<!-- bookconvert: image omitted, asset not extracted: ... -->`) so a thin
+(`<!-- sourceconvert: image omitted, asset not extracted: ... -->`) so a thin
 conversion is diagnosable rather than silent, and the sidecar records
 `dangling_refs_stripped`.
 
@@ -276,7 +276,7 @@ at all, so it reports `0` emitted against however many captions it read.
 For a book with real tables, use `marker`.
 
 **Heading fidelity (EPUB).** `headings_emitted` counts markdown headings in
-the converted body — BookConvert's own title line is excluded, so `0` means
+the converted body — sourceconvert's own title line is excluded, so `0` means
 `0`. `heading_source` says where they came from:
 
 | `heading_source` | Meaning |
@@ -336,7 +336,7 @@ EPUBs go through pandoc with raw HTML disabled, which gives you clean chapter he
 actually carries, and plenty of trade epubs style their chapter openers as
 `<p class="chaphead">` rather than `<h1>`. Those books used to convert to a
 single flat document with no warning — and because an epub is reflowable,
-that leaves the file with no addressing of any kind. BookConvert now checks
+that leaves the file with no addressing of any kind. sourceconvert now checks
 for semantic `h1`–`h6` first and, finding none, derives headings from the
 epub's own navigation (`toc.ncx` for EPUB 2, the nav document for EPUB 3),
 mapping nav nesting to heading depth. A chapter-ish CSS-class heuristic is
@@ -435,7 +435,7 @@ Note that `ps aux | grep marker_single` returns **nothing** even while marker is
 
 ### Folio capture is still partial when the page number sits beside a running head
 
-A folio sharing its line with a running head is now read (see *Page numbers* above), but only where the head beside it recurs on at least three pages. That bar is what keeps a line of prose from being mistaken for pagination, and it is paid for on short chapters: a book whose recto head is the *chapter* title, running two or three pages before the next chapter starts, loses those rectos. On Landsberg's *The Tao of Coaching* the versos all carry the book title and are read; the rectos carry chapter titles and roughly half fall under the bar. Capture on that scan goes from 19 of 136 to about 52 — enough to rest the offset on the whole body instead of on nine chapter openers, not enough to call the problem closed. Tracked in [#31](https://github.com/AndySparks/book-convert/issues/31).
+A folio sharing its line with a running head is now read (see *Page numbers* above), but only where the head beside it recurs on at least three pages. That bar is what keeps a line of prose from being mistaken for pagination, and it is paid for on short chapters: a book whose recto head is the *chapter* title, running two or three pages before the next chapter starts, loses those rectos. On Landsberg's *The Tao of Coaching* the versos all carry the book title and are read; the rectos carry chapter titles and roughly half fall under the bar. Capture on that scan goes from 19 of 136 to about 52 — enough to rest the offset on the whole body instead of on nine chapter openers, not enough to call the problem closed. Tracked in [#31](https://github.com/AndySparks/sourceconvert/issues/31).
 
 Two consequences worth knowing when you read a sidecar:
 
@@ -457,7 +457,7 @@ The failure class that actually justifies a repair pass is **silently wrong nume
 ## Project structure
 
 ```
-book-convert/
+sourceconvert/
   input/                         <- Drop your PDFs here
   output/                        <- Converted markdown files appear here
   archive/                       <- Optional: --archive moves converted source PDFs here

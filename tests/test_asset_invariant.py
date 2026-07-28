@@ -4,7 +4,7 @@
 
 It was broken for a year in the place it mattered most. Marker writes its
 figures as `_page_64_Figure_7.jpeg` beside the markdown in its scratch
-directory; BookConvert harvested `*.png` and `*.jpg` out of that directory —
+directory; sourceconvert harvested `*.png` and `*.jpg` out of that directory —
 never `*.jpeg` — and then deleted it, leaving every reference marker had
 already written pointing at nothing. 1,140 dead references across 49 sources
 downstream; ~92% of every converted source that should show a figure showed
@@ -173,7 +173,7 @@ def test_marker_that_loses_its_assets_does_not_dangle(tmp_path, monkeypatch):
     # human reading the file, not silent.
     text = md.read_text(encoding="utf-8")
     assert assets.iter_image_refs(text) == []
-    assert text.count("bookconvert: image omitted") == 2
+    assert text.count("sourceconvert: image omitted") == 2
 
 
 def test_marker_with_extraction_disabled_does_not_dangle(tmp_path, monkeypatch):
@@ -282,7 +282,7 @@ def test_text_only_conversion_is_unaffected(tmp_path):
     text = md.read_text(encoding="utf-8")
 
     assert "Lorem ipsum dolor sit amet." in text
-    assert "bookconvert: image omitted" not in text
+    assert "sourceconvert: image omitted" not in text
     assert report.assets == []
     assert report.dangling_refs_stripped == 0
     assert report.extracted_assets == 0
@@ -320,7 +320,7 @@ def test_epub_without_figures_is_unaffected(tmp_path):
 
     assert assets.count_dangling_refs(md) == 0
     assert report.dangling_refs_stripped == 0
-    assert "bookconvert: image omitted" not in md.read_text(encoding="utf-8")
+    assert "sourceconvert: image omitted" not in md.read_text(encoding="utf-8")
 
 
 # --- the manifest ----------------------------------------------------------

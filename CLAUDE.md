@@ -1,10 +1,10 @@
-# BookConvert
+# sourceconvert
 
 This project converts PDF books to clean Markdown files for use in Claude Projects and other LLM tools.
 
 **Spine status:** partially spined as of 2026-04-27. See `8-DECISIONS/2026-04-27-spine-adoption.md` for what travelled and what's an explicit divergence from the OS reference implementation. Spine vocabulary (the spine, spined, spine adoption, spine-native): `~/operating-system/8-DECISIONS/2026-04-27-spine-portability.md`.
 
-**Read @1-ROADMAP.md** at session start for the rolling punch list of work in flight (Now / Next / Blocked / Someday). Renamed from `docs/TASKS.md` on 2026-04-27 for spine alignment. BookConvert does not carry a full `0-STRATEGY.md`; strategic context lives upstream in Management Craft's `docs/0-STRATEGY.md` under the MC Research Loop Acquire step.
+**Read @1-ROADMAP.md** at session start for the rolling punch list of work in flight (Now / Next / Blocked / Someday). Renamed from `docs/TASKS.md` on 2026-04-27 for spine alignment. sourceconvert does not carry a full `0-STRATEGY.md`; strategic context lives upstream in Management Craft's `docs/0-STRATEGY.md` under the MC Research Loop Acquire step.
 
 ### Boil the ocean
 
@@ -51,7 +51,7 @@ After every conversion run, automatically spot-check each converted file:
    - Missing end-matter (bibliography, index, conclusion)
 3. **Rate each file** as good/fair/poor
 4. **Report findings** to the user in a summary table
-5. **Note any improvement opportunities** for the BookConvert tool itself and offer to file them as GitHub issues on AndySparks/BookConvert
+5. **Note any improvement opportunities** for the sourceconvert tool itself and offer to file them as GitHub issues on AndySparks/sourceconvert
 
 ## Dependencies
 

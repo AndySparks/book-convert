@@ -249,7 +249,7 @@ def _match_caption(
 # The invariant: the markdown a conversion emits never contains a reference to
 # a file that does not exist. It was broken for a year by the marker backend,
 # which writes `_page_64_Figure_7.jpeg` files into its scratch directory and
-# emits bare `![](_page_64_Figure_7.jpeg)` references to them; BookConvert
+# emits bare `![](_page_64_Figure_7.jpeg)` references to them; sourceconvert
 # harvested `*.png`/`*.jpg` (never `*.jpeg`) out of that scratch directory and
 # then deleted it, leaving every reference pointing at nothing. 1,140 dead
 # references across 49 sources downstream. See issue #34.
@@ -273,7 +273,7 @@ IMAGE_REF_RE = re.compile(r'!\[(?P<alt>[^\]]*)\]\((?P<inner>[^()]*)\)')
 
 # What a stripped reference leaves behind: nothing a reader sees, and enough
 # for a human debugging a thin conversion to find out what happened.
-STRIPPED_REF_COMMENT = "<!-- bookconvert: image omitted, asset not extracted: {target} -->"
+STRIPPED_REF_COMMENT = "<!-- sourceconvert: image omitted, asset not extracted: {target} -->"
 
 # A trailing `"title"` / 'title' on a link target.
 _LINK_TITLE_RE = re.compile(r'''\s+["'][^"']*["']\s*$''')
@@ -509,7 +509,7 @@ def build_asset_manifest(md_path: Path, asset_dir=None) -> List[dict]:
 def count_dangling_refs(md_path: Path) -> int:
     """How many local image references in `md_path` point at nothing.
 
-    The invariant says this is 0 for every conversion BookConvert emits. It
+    The invariant says this is 0 for every conversion sourceconvert emits. It
     exists so a test — and a suspicious operator — can assert that directly.
     """
     md_path = Path(md_path)

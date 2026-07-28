@@ -69,7 +69,7 @@ class ConversionReport:
     # "none" and headings are the *only* addressability an epub has — which
     # makes a structureless conversion otherwise indistinguishable from a
     # good one. `headings_emitted` counts markdown headings in the converted
-    # body (excluding BookConvert's own title line); `heading_source`
+    # body (excluding sourceconvert's own title line); `heading_source`
     # declares where they came from: "semantic" (the epub carried real
     # h1-h6), "nav" (derived from toc.ncx / the EPUB 3 nav document),
     # "class-heuristic" (derived from chapter-ish CSS classes, lower

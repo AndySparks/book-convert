@@ -331,6 +331,77 @@ behind that feature.
 - **Organize your output** into subdirectories by topic (e.g., `output/Coaching/`, `output/Writing/`) to keep things tidy.
 - **Use `--skip-existing`** when re-running on a directory to avoid re-converting files you already have.
 
+## Operating notes
+
+Things that bite in practice. None of them are bugs; all of them cost time before they were written down.
+
+### On Apple Silicon, force marker onto the CPU
+
+marker's surya models crash partway through a large book on the Mac GPU (`torch.AcceleratorError: index ... out of bounds`, typically around the halfway mark). The CPU path is slower but stable:
+
+```bash
+export TORCH_DEVICE=cpu PYTORCH_ENABLE_MPS_FALLBACK=1
+```
+
+`convert.py` calls `marker_single` by bare name, so the marker venv's `bin` must also be on `PATH` — invoking `.venv-marker/bin/python` alone is not enough:
+
+```bash
+export PATH="$PWD/.venv-marker/bin:$PATH"
+```
+
+If marker still misbehaves, fall back to `--method ocr` (tesseract, no GPU at all).
+
+### Check free memory before a long conversion
+
+marker holds roughly 8.6 GB of model weights resident. On a machine without room for them the run **does not fail — it crawls**, because the weights page in and out of swap. Observed: a book that converts in 11 minutes with headroom managed 3% of text recognition in 39 minutes when free memory had fallen to ~94 MB. That is a ~50× slowdown whose only symptom is a progress bar quietly revising its estimate upward.
+
+`convert.py` warns when headroom is short, but the cheap habit is to close browsers and Electron apps first:
+
+```bash
+vm_stat | grep -E "Pages free|Pages inactive"   # want >8 GB across the two
+```
+
+### The checkout is shared
+
+Several sessions may use one working tree. `convert.py` reports conversions already in flight before starting anything slow, and concurrent runs are fine — but two habits keep them out of each other's way:
+
+- **Pass the source path directly and name the output.** `input/` is a convention, not a requirement. `convert.py /path/to/book.pdf --output output/Topic` shares nothing.
+- **Never run directory mode** (`convert.py input/`) on a shared checkout. It will pick up whatever another session left in `input/`, convert it, and — with `--archive` — move it.
+
+### A backgrounded marker run looks like a hung one
+
+marker writes to a temp directory and only copies the finished `.md` into `output/` at the very end, so an empty output folder mid-run is normal. Launch long runs in the background and watch the log:
+
+```bash
+nohup python convert.py "$SRC" --method marker --output output/Topic --skip-check --verbose \
+  > logs/my-book.log 2>&1 &
+```
+
+Note that `ps aux | grep marker_single` returns **nothing** even while marker is running, because the process command is the resolved Python interpreter path. Check the wrapper PID or look for a Python process burning several hundred percent CPU.
+
+## Known limitations
+
+### Folio capture degrades when the page number sits beside a running head
+
+Page-number capture reads a crop of each page's margins. It is reliable when the folio stands alone and unreliable when the folio shares its line with a running head — on one 136-page scan, capture succeeded almost exclusively on chapter openers and reached only 19 of 136 pages. Tracked in [#31](https://github.com/AndySparks/book-convert/issues/31).
+
+Two consequences worth knowing when you read a sidecar:
+
+- Low `page_printed_coverage` on a clean scan usually means this, not a source without printed page numbers.
+- **Folio position varies by edition, not just by page.** Some books run the number at the foot of every page; others at the top outer corner. There is no safe default — render both margin bands and look before concluding a source has no page numbers.
+
+### EPUB has no pages
+
+EPUB is reflowable, so `page_numbering` is always `none` and there are no locators of any kind. Cite by chapter. If you need `p. N` from a work you only have as an EPUB, you need a print-faithful PDF; reconverting the EPUB will never produce one.
+
+### Table extraction on design-heavy books
+
+Marker's OCR of table *cells* is strong, but two things break independently of cell accuracy. Multi-level spanning headers cannot be expressed in GFM markdown at all (there is no colspan), and layout boxes or conceptual diagrams in designed books get forced into table grids, arriving visibly garbled — split words across cells, stray `<br>`, empty rows.
+
+Check `tables_emitted` against `table_captions_seen` in the sidecar. A wide gap means captions survived but their grids collapsed. `--html_tables_in_markdown` preserves structure GFM cannot, at the cost of readability.
+
+The failure class that actually justifies a repair pass is **silently wrong numeric cells** in statistical tables — dropped minus signs, dropped leading decimals, misaligned rows. Visible garble in a word-based matrix is annoying; a sign-flipped coefficient is a citation you cannot trust. Spot-check page images against the markdown for any book you intend to cite numerically.
+
 ## Project structure
 
 ```
@@ -338,8 +409,14 @@ book-convert/
   input/                         <- Drop your PDFs here
   output/                        <- Converted markdown files appear here
   archive/                       <- Optional: --archive moves converted source PDFs here
+  logs/                          <- Conversion logs (useful for backgrounded marker runs)
   docs/                          <- Design notes (paper extraction research, decisions, results)
+  tests/                         <- pytest suite
   convert.py                     <- Main conversion script
+  epub_structure.py              <- EPUB nav parsing + heading derivation
+  cleanup.py                     <- Post-conversion text cleanup
+  assets.py                      <- Figure and image extraction
+  report.py                      <- Sidecar conversion report
   requirements.txt               <- Default install (PyMuPDF only, Python 3.7+)
   requirements-marker.txt        <- marker-pdf extras (Python 3.10+)
   requirements-pymupdf4llm.txt   <- pymupdf4llm extras (Python 3.10+)

@@ -2,7 +2,7 @@
 
 > **The output never contains a reference to a file that does not exist.**
 
-Closes [issue #34](https://github.com/AndySparks/BookConvert/issues/34).
+Closes [issue #34](https://github.com/AndySparks/sourceconvert/issues/34).
 
 ## What went wrong
 
@@ -69,7 +69,7 @@ when a future backend emits a reference to something it never wrote.
 A stripped reference leaves an HTML comment:
 
 ```markdown
-<!-- bookconvert: image omitted, asset not extracted: _page_64_Figure_7.jpeg -->
+<!-- sourceconvert: image omitted, asset not extracted: _page_64_Figure_7.jpeg -->
 ```
 
 It renders as nothing, and it means a thin conversion is diagnosable by a human
@@ -83,7 +83,7 @@ reading the file rather than silent. The sidecar counts them in
 | **marker** | Yes — bare `_page_N_Figure_M.jpeg`. **This is the one that broke.** | Assets harvested by suffix set (not two globs) and references repointed by basename (not by a regex needing a `/`). `--no-extract-images` forwards `--disable_image_extraction` to `marker_single`. |
 | **pymupdf** | Only when it has just written the file | Extraction default flipped on. Structurally cannot dangle: the reference is stitched in by the same code that saves the PNG. |
 | **pymupdf4llm** | Yes, into `<stem>_images/` | `write_images` now follows `extract_images` instead of being hardcoded on. Its path-prefix rewrite was already correct; the sweep covers what it misses. |
-| **docling** | No — its default export mode emits `<!-- image -->` placeholders | Swept anyway. The invariant is a property of BookConvert's output, not a favour done to the backends we happen to distrust. |
+| **docling** | No — its default export mode emits `<!-- image -->` placeholders | Swept anyway. The invariant is a property of sourceconvert's output, not a favour done to the backends we happen to distrust. |
 | **ocr** (tesseract) | No — plain text only | Swept anyway. |
 | **pandoc** (EPUB) | **Yes** — the epub's internal media paths, for images it never writes | Route 2 only, deliberately. Extraction is not the answer here: the images an epub carries that survive `_clean_pandoc_output`'s decorative-glyph filter are overwhelmingly publisher furniture (covers, ornaments, imprint marks), and the epub path is documented as text-only. The references are stripped. |
 

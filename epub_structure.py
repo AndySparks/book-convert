@@ -1,6 +1,6 @@
 """EPUB structural-heading recovery — pure zip/markup logic, no pandoc.
 
-BookConvert routes EPUBs through pandoc on the premise that "pandoc maps
+sourceconvert routes EPUBs through pandoc on the premise that "pandoc maps
 epub chapter structure to markdown headings." That premise holds only when
 the EPUB actually carries semantic `<h1>`-`<h6>` tags. Plenty of trade
 EPUBs style their chapter openers as `<p class="chaphead">` instead, and

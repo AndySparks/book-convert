@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-BookConvert - Convert PDF and EPUB books to clean Markdown.
+sourceconvert - Convert PDF and EPUB books to clean Markdown.
 
 PDF conversion methods:
   - pymupdf (default): Fast, reliable text extraction using PyMuPDF/fitz
@@ -39,7 +39,7 @@ import time
 import traceback
 from pathlib import Path
 
-log = logging.getLogger("bookconvert")
+log = logging.getLogger("sourceconvert")
 
 from report import ConversionReport, write_report
 import assets
@@ -93,7 +93,7 @@ def check_dependencies(method):
         #      `.venv-marker/bin/marker_single` without needing the venv
         #      to be activated on PATH).
         #   2. PATH itself (for users who've activated the venv).
-        # The venv-sibling lookup matters because running bookconvert
+        # The venv-sibling lookup matters because running sourceconvert
         # from a non-activated venv is the common case in tools and
         # scripts, and requiring activation introduces a class of silent
         # failures when the caller forgets `source`.
@@ -3558,7 +3558,7 @@ def _strip_pandoc_frontmatter(body):
 
     When pandoc produces gfm output from an epub with metadata (title,
     author, rights), it emits a `---\\n<yaml>\\n---\\n` block at the top.
-    We strip it so the BookConvert header block (title, source, ---) can
+    We strip it so the sourceconvert header block (title, source, ---) can
     sit at the top of the file in the same shape as the PDF output.
     """
     if not body.startswith("---\n"):
@@ -3602,7 +3602,7 @@ def convert_with_pandoc(book_path, output_dir):
 
     Pandoc maps epub chapter structure to markdown headings, so the
     output keeps the book's natural reading order without page markers.
-    Images are referenced but not extracted (BookConvert is a text-only
+    Images are referenced but not extracted (sourceconvert is a text-only
     pipeline; pulling images would inflate output and break offline use).
     Returns a ConversionReport and writes the sidecar, like every other
     backend; its `page_numbering` is always "none" because an epub is
@@ -3631,7 +3631,7 @@ def convert_with_pandoc(book_path, output_dir):
         tmp_path = Path(tmp.name)
 
     try:
-        with tempfile.TemporaryDirectory(prefix="bookconvert-epub-") as work:
+        with tempfile.TemporaryDirectory(prefix="sourceconvert-epub-") as work:
             try:
                 convert_path, heading_source, injected = (
                     epub_structure.prepare_epub(book_path, Path(work))
@@ -3704,7 +3704,7 @@ def convert_with_pandoc(book_path, output_dir):
         output=str(output_file),
         method="pandoc",
     )
-    # Count headings in the converted body only. BookConvert's own `# Title`
+    # Count headings in the converted body only. sourceconvert's own `# Title`
     # line is chrome, not structure: counting it would report "1 heading" for
     # exactly the flat-document failure this signal exists to expose.
     report.headings_emitted = epub_structure.count_markdown_headings(body)
@@ -3734,7 +3734,7 @@ def convert_with_pandoc(book_path, output_dir):
     # drop. Extraction is NOT the answer here the way it is for the PDF
     # backends: the images an epub carries that survive that filter are
     # overwhelmingly publisher furniture — covers, ornaments, imprint marks —
-    # and BookConvert's epub path is documented as text-only. So epub takes
+    # and sourceconvert's epub path is documented as text-only. So epub takes
     # the other route to the same invariant: the references are stripped.
     _finalize_assets(report)
     write_report(output_file.with_suffix(".report.json"), report)
@@ -3747,7 +3747,7 @@ def convert_with_pymupdf4llm(pdf_path, output_dir, extract_images=True):
     pymupdf4llm is PyMuPDF's own LLM-oriented markdown exporter. It
     handles multi-column reading order, image extraction, tables, and
     auto-OCR for scanned pages. This backend is a light wrapper: we
-    call `to_markdown()` and stitch the output into BookConvert's
+    call `to_markdown()` and stitch the output into sourceconvert's
     standard header format.
     """
     import pymupdf4llm
@@ -3874,7 +3874,7 @@ def convert_with_docling(pdf_path, output_dir):
     _apply_backend_page_numbering(report)
     # Docling's default export mode emits `<!-- image -->` placeholders rather
     # than file references, so there is normally nothing here to enforce. It
-    # gets the same sweep anyway: the invariant is a property of BookConvert's
+    # gets the same sweep anyway: the invariant is a property of sourceconvert's
     # output, not a favour we do the backends we happen to distrust.
     _finalize_assets(report)
     write_report(output_file.with_suffix(".report.json"), report)
@@ -4005,7 +4005,7 @@ def _apply_cleanup(result):
 
 # --- concurrent conversions -------------------------------------------------
 #
-# One BookConvert checkout is shared by several agent sessions and by Andy.
+# One sourceconvert checkout is shared by several agent sessions and by Andy.
 # The realistic collision is not two people converting the same book: it is one
 # workspace running a two-hour OCR of a scanned book while another converts a
 # handful of papers for an unrelated project. Both should proceed — serialising

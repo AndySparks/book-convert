@@ -26,6 +26,22 @@ class ConversionReport:
     ocr_pages: int = 0
     two_column_pages: int = 0
     extracted_assets: int = 0
+    # Asset manifest. `assets` is one entry per file this conversion wrote,
+    # with the references that point at it:
+    #   {"path": "Book_images/_page_64_Figure_7.jpeg",
+    #    "bytes": 48213,
+    #    "references": [{"target": "...", "alt": "...", "line": 812}]}
+    # Paths are relative to the markdown file. A consumer relocates assets by
+    # reading this list — never by pattern-matching a backend's filename
+    # convention, which is a private detail that changes without notice.
+    #
+    # `dangling_refs_stripped` counts references to files that were not
+    # written and so were removed from the markdown. The invariant is that
+    # the emitted markdown has zero remaining dangling references; a non-zero
+    # count here says how much the sweep had to do to get there, which is the
+    # signal that extraction was off or a backend lost its assets (issue #34).
+    assets: List[dict] = field(default_factory=list)
+    dangling_refs_stripped: int = 0
     quality_score: float = 1.0
     skipped_toc_pages: int = 0
     cleaned: bool = False

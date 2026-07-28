@@ -540,3 +540,130 @@ def build_structureless_epub(
          '    <p>Nor here. The nav is empty too.</p>' % cls),
     ]
     return build_epub(tmp_path, docs, nav=None, nav_style="none", name=name)
+
+
+# --- marker stand-in -------------------------------------------------------
+#
+# A real marker run on a book is 25+ minutes and needs model weights. What the
+# asset invariant depends on is not marker's cleverness but its *output shape*:
+# a markdown file that references figures by bare `.jpeg` filename, and the
+# figure files sitting beside it in marker's own scratch directory. That shape
+# is what these fixtures reproduce.
+
+MARKER_FIGURE_PAGE = """\
+{{{page}}}------------------------------------------------
+
+## Chapter {page}
+
+The model below is the one the rest of the chapter argues from.
+
+![]({figure})
+
+*Figure {page}.1 The four-quadrant model.*
+
+Managers who skip it tend to skip the argument with it.
+"""
+
+
+def fake_marker_output(out_dir: Path, stem: str, pages=(3, 7),
+                       write_images: bool = True,
+                       suffix: str = ".jpeg") -> Path:
+    """Write a directory shaped like a real marker_single run.
+
+    marker writes `<out_dir>/<stem>/<stem>.md` plus its figure files as
+    siblings of that markdown, named `_page_N_Figure_M.jpeg`. The references
+    in the markdown are bare filenames with no directory component — which is
+    why a rewrite regex that requires a `/` never matched them.
+
+    With `write_images=False` the references are emitted and the files are
+    not, which is precisely the state issue #34 describes.
+    """
+    doc_dir = Path(out_dir) / stem
+    doc_dir.mkdir(parents=True, exist_ok=True)
+    body = []
+    for page in pages:
+        figure = f"_page_{page}_Figure_1{suffix}"
+        body.append(MARKER_FIGURE_PAGE.format(page=page, figure=figure))
+        if write_images:
+            # A one-pixel PNG is a real file with real bytes; the suffix is
+            # what the harvesting code keys on, and lying about it is the
+            # point of the test.
+            (doc_dir / figure).write_bytes(_ONE_PIXEL_PNG)
+    md = doc_dir / f"{stem}.md"
+    md.write_text("\n".join(body), encoding="utf-8")
+    return md
+
+
+# Smallest valid PNG: 1x1, opaque white.
+_ONE_PIXEL_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d494844520000000100000001080200000090"
+    "7753de0000000c4944415408d763f8cfc0000003010100189dd6e1000000"
+    "0049454e44ae426082"
+)
+
+
+def patch_marker(monkeypatch, convert_module, **kwargs):
+    """Make `convert_with_marker` run against `fake_marker_output`.
+
+    Stubs the subprocess.Popen call so no marker, no model weights, and no
+    25-minute wait are involved. Extra kwargs are forwarded to
+    `fake_marker_output`; `--disable_image_extraction` on the command line
+    overrides `write_images`, the way real marker would.
+    """
+    def fake_popen(cmd, *args, **popen_kwargs):
+        out_dir = Path(cmd[cmd.index("--output_dir") + 1])
+        stem = Path(cmd[1]).stem
+        opts = dict(kwargs)
+        if "--disable_image_extraction" in cmd:
+            opts["write_images"] = False
+            opts["emit_refs"] = opts.get("emit_refs", False)
+        if opts.pop("emit_refs", True):
+            fake_marker_output(out_dir, stem, **opts)
+        else:
+            # marker with image extraction disabled drops the references too.
+            doc_dir = out_dir / stem
+            doc_dir.mkdir(parents=True, exist_ok=True)
+            (doc_dir / f"{stem}.md").write_text(
+                "{3}------------------------------------------------\n\n"
+                "## Chapter 3\n\nText only.\n",
+                encoding="utf-8",
+            )
+        return _FakeProc()
+
+    monkeypatch.setattr(convert_module.subprocess, "Popen", fake_popen)
+
+
+class _FakeProc:
+    """Just enough of Popen for convert_with_marker's streaming loop."""
+
+    def __init__(self, lines=("Loaded detection model\n", "Saved output\n")):
+        self.stdout = iter(lines)
+
+    def wait(self):
+        return 0
+
+
+def build_figure_epub(tmp_path: Path, name: str = "figure.epub") -> Path:
+    """An EPUB whose chapters carry `<img>` tags with alt text.
+
+    Pandoc turns these into markdown image references pointing at the epub's
+    internal media paths — for images BookConvert never writes out. Alt text
+    matters: `_clean_pandoc_output` already drops empty-alt references on
+    their own line, so an alt-bearing image is the one that survives to
+    dangle. This is the epub half of issue #34.
+    """
+    docs = [
+        ("ch1.xhtml",
+         '    <h1>The Opening Move</h1>\n'
+         '    <p>She names the work before anyone touches it.</p>\n'
+         '    <p><img src="images/fig1.png" alt="Figure 1.1 The loop"/></p>'),
+        ("ch2.xhtml",
+         '    <h1>The Second Move</h1>\n'
+         '    <p>Then she tells them, in words they can repeat.</p>\n'
+         '    <p><img src="images/fig2.png" alt="Figure 2.1 The ladder"/></p>'),
+    ]
+    nav = [
+        (1, "The Opening Move", "ch1.xhtml"),
+        (1, "The Second Move", "ch2.xhtml"),
+    ]
+    return build_epub(tmp_path, docs, nav, "ncx", name=name)

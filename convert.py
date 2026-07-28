@@ -2841,12 +2841,16 @@ def _is_broken_toc_page(text):
     return matches / len(non_empty) >= 0.5
 
 
-def convert_with_pymupdf(pdf_path, output_dir, extract_images=False):
+def convert_with_pymupdf(pdf_path, output_dir, extract_images=True):
     """Convert a PDF using PyMuPDF (fitz) for text extraction.
 
     Raises ConversionError if the PDF appears to be scanned (too little text).
-    When extract_images is True, figures and diagrams are rendered as PNGs
-    into a <stem>_assets/ subdirectory alongside the markdown.
+    `extract_images` defaults to True: figures and diagrams are rendered as
+    PNGs into a <stem>_assets/ subdirectory alongside the markdown, and the
+    references in the text point at files that are there. Setting it False
+    emits neither the assets nor references to them — this backend only
+    stitches a reference in when it has just written the file, so text-only
+    output here is complete rather than perforated.
     """
     import fitz
 
@@ -3116,6 +3120,7 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=False):
     report.quality_score = quality
     report.skipped_toc_pages = skipped_toc_pages
     report.extracted_assets = total_assets
+    _finalize_assets(report, asset_dir=asset_dir)
 
     report_path = output_file.with_suffix(".report.json")
     write_report(report_path, report)
@@ -3357,13 +3362,21 @@ def warn_if_memory_is_tight(page_count=None):
     return free_gb
 
 
-def convert_with_marker(pdf_path, output_dir, marker_args=None):
+def convert_with_marker(pdf_path, output_dir, marker_args=None,
+                        extract_images=True):
     """Convert a text-based PDF using Marker.
 
     Runs Marker in an isolated temp directory to avoid corrupting existing output.
     `marker_args` is a list of extra flags forwarded verbatim to
     `marker_single` (see `marker_single --help`) — this is how table-quality
     flags like `--use_llm` and `--html_tables_in_markdown` are reached.
+
+    `extract_images` is on by default: marker finds the figures whether we ask
+    it to or not, so the only question is whether we keep them, and the
+    answer used to be no while the references stayed in the markdown. When
+    it is off we tell marker to skip image extraction outright, and the
+    finalizer strips any reference marker emits anyway.
+
     Raises ConversionError on failure.
     """
     print(f"Converting with Marker: {pdf_path.name}")
@@ -3378,6 +3391,12 @@ def convert_with_marker(pdf_path, output_dir, marker_args=None):
         # citable address cannot be fixed later without reconverting, and
         # marker is the only backend that works on a scanned book.
         cmd.extend(MARKER_LOCATOR_ARGS)
+        if not extract_images:
+            # Only sent on the explicit opt-out path. An older marker that
+            # does not know this flag would abort the run, and that risk
+            # belongs to the caller who asked for text-only, never to the
+            # default.
+            cmd.append("--disable_image_extraction")
         if marker_args:
             cmd.extend(marker_args)
             print(f"  extra marker args: {' '.join(marker_args)}")
@@ -3416,40 +3435,14 @@ def convert_with_marker(pdf_path, output_dir, marker_args=None):
         target = output_dir / f"{pdf_path.stem}.md"
         shutil.move(str(md_files[0]), str(target))
 
-        # Move any image directories that marker produced
-        img_dirs = [d for d in tmp_path.rglob("*") if d.is_dir() and d.name == "images"]
-        if not img_dirs:
-            # Also check for any image files directly
-            img_files = list(tmp_path.rglob("*.png")) + list(tmp_path.rglob("*.jpg"))
-            if img_files:
-                img_dest = output_dir / f"{pdf_path.stem}_images"
-                img_dest.mkdir(exist_ok=True)
-                for img in img_files:
-                    shutil.move(str(img), str(img_dest / img.name))
-                # Update image paths in the markdown
-                content = target.read_text(encoding="utf-8")
-                content = re.sub(
-                    r'!\[([^\]]*)\]\((?:[^)]*/)([^)]+)\)',
-                    rf'![\1]({pdf_path.stem}_images/\2)',
-                    content
-                )
-                target.write_text(content, encoding="utf-8")
-                print(f"  Moved {len(img_files)} image(s) to {img_dest}")
-        else:
-            for img_dir in img_dirs:
-                img_dest = output_dir / f"{pdf_path.stem}_images"
-                if img_dest.exists():
-                    shutil.rmtree(str(img_dest))
-                shutil.move(str(img_dir), str(img_dest))
-                # Update image paths in the markdown
-                content = target.read_text(encoding="utf-8")
-                content = re.sub(
-                    r'!\[([^\]]*)\]\((?:[^)]*/)([^)]+)\)',
-                    rf'![\1]({pdf_path.stem}_images/\2)',
-                    content
-                )
-                target.write_text(content, encoding="utf-8")
-                print(f"  Moved images to {img_dest}")
+        # Marker's figures live in the scratch tree beside the markdown it
+        # just wrote. `_finalize_assets` below harvests them into `img_dest`
+        # before the TemporaryDirectory takes them to the grave. A previous
+        # conversion of the same book owns nothing here, so clear the
+        # directory rather than merging two runs' assets into it.
+        img_dest = output_dir / f"{pdf_path.stem}_images"
+        if img_dest.exists():
+            shutil.rmtree(str(img_dest))
 
         if len(md_files) > 1:
             log.warning("Marker produced %d .md files; only the first was used", len(md_files))
@@ -3474,6 +3467,16 @@ def convert_with_marker(pdf_path, output_dir, marker_args=None):
             f"{report.table_captions_seen} captions seen"
         )
         _apply_backend_page_numbering(report)
+        # Issue #34 lived in the seven lines this call replaced. They globbed
+        # `*.png` and `*.jpg` out of the scratch tree — marker writes `.jpeg`
+        # — so the files were never found and were deleted with the temp
+        # directory, while the references marker had already written into the
+        # markdown stayed put, pointing at nothing. (The rewrite regex was
+        # broken too: it required a `/` in the target, and marker's
+        # `![](_page_64_Figure_7.jpeg)` has none.) Matching is on a suffix set
+        # and on basenames now, and whatever is still unaccounted for gets
+        # stripped rather than shipped dangling.
+        _finalize_assets(report, scratch_root=tmp_path, asset_dir=img_dest)
         report_path = target.with_suffix(".report.json")
         write_report(report_path, report)
         return report
@@ -3542,6 +3545,9 @@ def convert_with_ocr(pdf_path, output_dir):
     # instead of leaving it to be discovered during a scholarly pass.
     apply_table_signals(report, output_file)
     _apply_backend_page_numbering(report)
+    # Tesseract emits plain text and never an image reference; the sweep is
+    # here so the invariant holds for every backend without exception.
+    _finalize_assets(report)
     report_path = output_file.with_suffix(".report.json")
     write_report(report_path, report)
     return report
@@ -3722,11 +3728,20 @@ def convert_with_pandoc(book_path, output_dir):
             "conversion has no structural addressing of any kind"
         )
     _apply_backend_page_numbering(report)
+    # Pandoc references the epub's internal media paths (`media/image1.jpg`)
+    # for images it never writes out, so an epub conversion dangles by
+    # construction for every reference `_clean_pandoc_output` did not already
+    # drop. Extraction is NOT the answer here the way it is for the PDF
+    # backends: the images an epub carries that survive that filter are
+    # overwhelmingly publisher furniture — covers, ornaments, imprint marks —
+    # and BookConvert's epub path is documented as text-only. So epub takes
+    # the other route to the same invariant: the references are stripped.
+    _finalize_assets(report)
     write_report(output_file.with_suffix(".report.json"), report)
     return report
 
 
-def convert_with_pymupdf4llm(pdf_path, output_dir):
+def convert_with_pymupdf4llm(pdf_path, output_dir, extract_images=True):
     """Convert a PDF using pymupdf4llm's Markdown exporter.
 
     pymupdf4llm is PyMuPDF's own LLM-oriented markdown exporter. It
@@ -3759,10 +3774,11 @@ def convert_with_pymupdf4llm(pdf_path, output_dir):
     # error out.
     safe_stem = re.sub(r"\s+", "_", pdf_path.stem)
     image_dir = output_dir / f"{safe_stem}_images"
-    image_dir.mkdir(parents=True, exist_ok=True)
+    if extract_images:
+        image_dir.mkdir(parents=True, exist_ok=True)
     page_chunks = pymupdf4llm.to_markdown(
         str(pdf_path),
-        write_images=True,
+        write_images=extract_images,
         image_path=str(image_dir),
         image_format="png",
         page_chunks=True,
@@ -3803,19 +3819,15 @@ def convert_with_pymupdf4llm(pdf_path, output_dir):
     output_file.write_text(header + markdown, encoding="utf-8", errors="replace")
     print(f"  -> {output_file}")
 
-    extracted_assets = 0
-    if image_dir.exists():
-        extracted_assets = sum(1 for _ in image_dir.glob("*"))
-
     report = ConversionReport(
         source=str(pdf_path),
         output=str(output_file),
         method="pymupdf4llm",
         total_pages=total_pages,
         pages_with_text=total_pages,  # pymupdf4llm handles its own detection
-        extracted_assets=extracted_assets,
     )
     _apply_backend_page_numbering(report)
+    _finalize_assets(report, asset_dir=image_dir)
     write_report(output_file.with_suffix(".report.json"), report)
     return report
 
@@ -3860,9 +3872,95 @@ def convert_with_docling(pdf_path, output_dir):
         pages_with_text=total_pages,
     )
     _apply_backend_page_numbering(report)
+    # Docling's default export mode emits `<!-- image -->` placeholders rather
+    # than file references, so there is normally nothing here to enforce. It
+    # gets the same sweep anyway: the invariant is a property of BookConvert's
+    # output, not a favour we do the backends we happen to distrust.
+    _finalize_assets(report)
     write_report(output_file.with_suffix(".report.json"), report)
     return report
 
+
+
+def _finalize_assets(report, scratch_root=None, asset_dir=None):
+    """Land every asset, kill every dead reference, and record the manifest.
+
+    The last thing each backend does. Three steps, in order:
+
+    1. **Harvest.** If the backend wrote its assets into a scratch directory
+       it is about to lose (marker's temp tree), move them next to the
+       markdown and repoint the references at their new home. Backends that
+       write straight into the output directory pass `asset_dir` alone.
+    2. **Enforce.** Strip any reference still pointing at a file that does not
+       exist. This is the invariant — *the output never contains a reference
+       to a file that does not exist* — and it holds no matter which backend
+       ran, whether extraction was on, or what the backend believed it wrote.
+       Extraction-by-default (step 1 and the `--extract-images` default) is
+       what keeps satisfying the invariant from being a loss; this step is
+       what makes it true.
+    3. **Manifest.** Record every asset and the references pointing at it, so
+       a consumer can relocate assets without pattern-matching a backend's
+       private filename convention.
+
+    See issue #34: marker emitted `![](_page_64_Figure_7.jpeg)` while writing
+    no such file, 1,140 times across 49 sources, and nothing in the output
+    said so.
+    """
+    if not isinstance(report, ConversionReport) or not report.output:
+        return report
+    md_path = Path(report.output)
+    if not md_path.exists():
+        return report
+    asset_dir = Path(asset_dir) if asset_dir is not None else None
+
+    if scratch_root is not None:
+        harvested = assets.collect_asset_files(scratch_root)
+        if harvested:
+            if asset_dir is None:
+                asset_dir = md_path.parent / f"{md_path.stem}_images"
+            mapping = assets.harvest_assets(harvested, asset_dir)
+            text = md_path.read_text(encoding="utf-8", errors="replace")
+            text, rewrites = assets.rewrite_asset_refs(
+                text, mapping, asset_dir.name
+            )
+            md_path.write_text(text, encoding="utf-8", errors="replace")
+            print(
+                f"  assets: {len(mapping)} written to {asset_dir.name}/ "
+                f"({rewrites} reference(s) repointed)"
+            )
+
+    stripped = assets.enforce_reference_invariant(md_path)
+    report.assets = assets.build_asset_manifest(md_path, asset_dir)
+    report.extracted_assets = len(report.assets)
+    report.dangling_refs_stripped = len(stripped)
+    if stripped:
+        report.warnings.append(
+            f"stripped {len(stripped)} image reference(s) to files that were "
+            f"not written (first: {stripped[0]}). The output is intact; the "
+            f"figures are not in it."
+        )
+        print(
+            f"  WARNING: {len(stripped)} image reference(s) pointed at files "
+            f"that were never written; stripped so the output does not dangle."
+        )
+    return report
+
+
+def _refresh_asset_manifest(report):
+    """Rebuild the manifest against the markdown as it now stands on disk.
+
+    Used after a pass that rewrites the file (cleanup), because the manifest
+    carries per-reference line numbers. Asset directories are recovered from
+    the existing manifest so assets nothing references stay listed.
+    """
+    md_path = Path(report.output)
+    asset_dirs = {
+        md_path.parent / Path(entry["path"]).parent
+        for entry in report.assets
+        if Path(entry["path"]).parent != Path(".")
+    }
+    report.assets = assets.build_asset_manifest(md_path, asset_dirs)
+    report.extracted_assets = len(report.assets)
 
 
 def _apply_cleanup(result):
@@ -3892,6 +3990,10 @@ def _apply_cleanup(result):
     # file that actually landed on disk.
     if cleaned != original:
         result.tables_emitted, result.table_captions_seen = count_table_signals(cleaned)
+        # The manifest records a line number per reference. Cleanup rewrites
+        # the file underneath it, so recompute rather than ship a manifest
+        # that describes the pre-cleanup text.
+        _refresh_asset_manifest(result)
     if not stats.get("dejoin_available"):
         result.warnings.append(
             "cleanup: de-join pass skipped (pyspellchecker not installed; "
@@ -3993,14 +4095,17 @@ def describe_other_conversions(others, now):
 
 
 def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False,
-                 extract_images=False, clean=True, marker_args=None):
+                 extract_images=True, clean=True, marker_args=None):
     """Convert a single book (PDF or EPUB) to markdown.
 
     Returns True on success, False on failure. Never raises.
     EPUB files route through pandoc regardless of `method`. For PDFs,
     if auto_ocr is True and pymupdf/marker fails due to scanned content,
     automatically retries with OCR.
-    When extract_images is True, figures are rendered as PNGs (pymupdf only).
+    `extract_images` defaults to True: every PDF backend writes the figures
+    it finds. Setting it False converts text only and strips the references
+    to the figures that were skipped, so the output never dangles either way
+    (issue #34).
     When clean is True (default), a verbatim-safe post-conversion pass repairs
     common extraction artifacts (dropped-space joins, stray-consonant citation
     ghosts, picture-text garble) on the emitted markdown.
@@ -4029,9 +4134,12 @@ def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False,
         if method == "ocr":
             result = convert_with_ocr(book_path, output_dir)
         elif method == "marker":
-            result = convert_with_marker(book_path, output_dir, marker_args=marker_args)
+            result = convert_with_marker(book_path, output_dir,
+                                         marker_args=marker_args,
+                                         extract_images=extract_images)
         elif method == "pymupdf4llm":
-            result = convert_with_pymupdf4llm(book_path, output_dir)
+            result = convert_with_pymupdf4llm(book_path, output_dir,
+                                              extract_images=extract_images)
         elif method == "docling":
             result = convert_with_docling(book_path, output_dir)
         else:
@@ -4055,7 +4163,9 @@ def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False,
             try:
                 check_dependencies(chosen)
                 if chosen == "marker":
-                    result = convert_with_marker(book_path, output_dir, marker_args=marker_args)
+                    result = convert_with_marker(book_path, output_dir,
+                                                 marker_args=marker_args,
+                                                 extract_images=extract_images)
                 else:
                     result = convert_with_ocr(book_path, output_dir)
                 if clean:
@@ -4214,9 +4324,14 @@ def main():
     )
     parser.add_argument(
         "--extract-images",
-        action="store_true",
-        help="Extract figures, diagrams, and raster images as PNGs alongside "
-             "the markdown (pymupdf backend only).",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write figures, diagrams, and raster images alongside the "
+             "markdown. ON by default: a backend that emits a reference to a "
+             "figure has already done the work of finding it, and throwing "
+             "the file away is pure loss. --no-extract-images converts text "
+             "only — the references to the discarded figures are stripped, "
+             "never left dangling.",
     )
     parser.add_argument(
         "--marker-args",

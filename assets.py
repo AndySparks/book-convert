@@ -1,20 +1,32 @@
-"""Image region detection and rendering for BookConvert.
+"""Image region detection, rendering, and reference bookkeeping.
 
-Extracts figures, diagrams, and raster images from PDF pages and renders
-them as PNGs via clipped `page.get_pixmap`. The rendered assets get a
-markdown image reference stitched into the page text by the pymupdf
-backend.
+Two halves live here.
+
+**Detection and rendering** (pymupdf backend): extracts figures, diagrams,
+and raster images from PDF pages and renders them as PNGs via clipped
+`page.get_pixmap`. The rendered assets get a markdown image reference
+stitched into the page text by the pymupdf backend.
 
 Three sources feed the region list:
   1. Raster images embedded in the PDF (page.get_image_info()).
   2. Vector drawings clustered by bounding box (page.get_drawings()).
   3. Figure captions near the above regions (CAPTION_RE).
+
+**Reference bookkeeping** (every backend): the invariant that the emitted
+markdown never references a file that does not exist, plus the asset
+manifest that lets a consumer relocate assets without knowing how any
+backend names its files. See `enforce_reference_invariant` and
+`build_asset_manifest`. This half deliberately does not import fitz-level
+concepts — it works on markdown text and the filesystem, so every backend
+(marker, pandoc, pymupdf4llm, docling, pymupdf) can end with the same call.
 """
 from __future__ import annotations
 
 import re
+import shutil
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, Iterable, List, NamedTuple, Tuple
+from urllib.parse import unquote, urlsplit
 
 import fitz
 
@@ -228,3 +240,301 @@ def _match_caption(
             best_dist = dy
             best = text
     return best
+
+
+# ---------------------------------------------------------------------------
+# Reference bookkeeping — the never-dangle invariant and the asset manifest
+# ---------------------------------------------------------------------------
+#
+# The invariant: the markdown a conversion emits never contains a reference to
+# a file that does not exist. It was broken for a year by the marker backend,
+# which writes `_page_64_Figure_7.jpeg` files into its scratch directory and
+# emits bare `![](_page_64_Figure_7.jpeg)` references to them; BookConvert
+# harvested `*.png`/`*.jpg` (never `*.jpeg`) out of that scratch directory and
+# then deleted it, leaving every reference pointing at nothing. 1,140 dead
+# references across 49 sources downstream. See issue #34.
+#
+# Enforcement is two-layered on purpose:
+#   1. Extract by default, so the asset the reference names is actually there.
+#   2. Sweep afterwards regardless, so a reference that still has no file —
+#      because extraction was disabled, or because a backend emitted a
+#      reference to something it never wrote — is stripped, not left dangling.
+# Layer 2 is the invariant; layer 1 is what makes satisfying it not a loss.
+
+# Every raster suffix any backend of ours emits, plus the ones they might.
+IMAGE_SUFFIXES = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".svg",
+})
+
+# A markdown image reference. The inner group is everything between the
+# parentheses — target plus an optional "title" — split apart by
+# `_split_link_target` rather than by a hairier regex.
+IMAGE_REF_RE = re.compile(r'!\[(?P<alt>[^\]]*)\]\((?P<inner>[^()]*)\)')
+
+# What a stripped reference leaves behind: nothing a reader sees, and enough
+# for a human debugging a thin conversion to find out what happened.
+STRIPPED_REF_COMMENT = "<!-- bookconvert: image omitted, asset not extracted: {target} -->"
+
+# A trailing `"title"` / 'title' on a link target.
+_LINK_TITLE_RE = re.compile(r'''\s+["'][^"']*["']\s*$''')
+
+
+class ImageRef(NamedTuple):
+    """One markdown image reference located in a document."""
+
+    alt: str
+    target: str          # exactly as written between the parens
+    start: int           # character offset of the `!` in the source text
+    end: int             # character offset one past the closing paren
+    line: int            # 1-indexed line number
+
+
+def _split_link_target(inner: str) -> str:
+    """Return the target from a markdown link's parenthesised inner text."""
+    inner = inner.strip()
+    angled = re.match(r'^<(?P<t>[^>]*)>', inner)
+    if angled:
+        return angled.group("t").strip()
+    return _LINK_TITLE_RE.sub("", inner).strip()
+
+
+def is_local_target(target: str) -> bool:
+    """True if `target` names a file on disk rather than a remote resource.
+
+    Absolute paths count as local — they are still a file reference, and one
+    that points outside the output directory is exactly the kind of thing the
+    invariant should catch.
+    """
+    if not target:
+        return False
+    if target.startswith("//") or target.startswith("#"):
+        return False
+    scheme = urlsplit(target).scheme
+    # A bare Windows drive letter ("c:/x.png") parses as a scheme; a real
+    # scheme is at least two characters.
+    return len(scheme) < 2
+
+
+def iter_image_refs(text: str) -> List[ImageRef]:
+    """Every markdown image reference in `text`, in document order."""
+    refs: List[ImageRef] = []
+    for m in IMAGE_REF_RE.finditer(text):
+        target = _split_link_target(m.group("inner"))
+        refs.append(ImageRef(
+            alt=m.group("alt"),
+            target=target,
+            start=m.start(),
+            end=m.end(),
+            line=text.count("\n", 0, m.start()) + 1,
+        ))
+    return refs
+
+
+def resolve_target(md_path: Path, target: str) -> Path:
+    """Filesystem path a local reference in `md_path` points at."""
+    decoded = unquote(target)
+    path = Path(decoded)
+    if path.is_absolute():
+        return path
+    return Path(md_path).parent / path
+
+
+def collect_asset_files(root: Path) -> List[Path]:
+    """Every image file under `root`, recursively, sorted for determinism.
+
+    Suffix matching is case-insensitive and covers `.jpeg` as well as `.jpg`
+    — the one-character gap that produced issue #34.
+    """
+    root = Path(root)
+    if not root.is_dir():
+        return []
+    return sorted(
+        p for p in root.rglob("*")
+        if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES
+    )
+
+
+def harvest_assets(files: Iterable[Path], dest_dir: Path) -> Dict[str, str]:
+    """Move `files` into `dest_dir`, flattened, and map old name -> new name.
+
+    Backends drop assets in nested scratch directories under names that are
+    unique only within their own subdirectory, so flattening can collide. A
+    collision gets the parent directory name prefixed rather than silently
+    overwriting the earlier file — no asset is ever lost to a name clash.
+
+    The returned mapping is keyed by original basename, which is also how
+    references are matched, so two genuinely different files sharing a
+    basename cannot be told apart by a reference either. First one wins; both
+    files are kept. This is a real ambiguity in the input, not one this
+    function introduces, and the invariant holds regardless: the reference
+    points at a file that exists.
+    """
+    files = [Path(f) for f in files]
+    if not files:
+        return {}
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    mapping: Dict[str, str] = {}
+    taken: set = {p.name for p in dest_dir.iterdir()} if dest_dir.exists() else set()
+    for src in files:
+        name = src.name
+        if name in taken:
+            name = f"{src.parent.name}-{src.name}"
+            counter = 2
+            while name in taken:
+                name = f"{src.parent.name}-{counter}-{src.name}"
+                counter += 1
+        taken.add(name)
+        shutil.move(str(src), str(dest_dir / name))
+        mapping.setdefault(src.name, name)
+    return mapping
+
+
+def rewrite_asset_refs(text: str, mapping: Dict[str, str], dest_rel: str) -> Tuple[str, int]:
+    """Point every local reference whose basename is in `mapping` at `dest_rel`.
+
+    Matching is on the reference's *basename*, so it works whether the backend
+    emitted a bare filename (`![](_page_64_Figure_7.jpeg)`, marker) or a path
+    with directories in it (`![](images/x.png)`). Returns (text, rewrites).
+    """
+    if not mapping:
+        return text, 0
+
+    rewrites = 0
+
+    def replace(m: re.Match) -> str:
+        nonlocal rewrites
+        target = _split_link_target(m.group("inner"))
+        if not is_local_target(target):
+            return m.group(0)
+        basename = Path(unquote(target)).name
+        new_name = mapping.get(basename)
+        if new_name is None:
+            return m.group(0)
+        rewrites += 1
+        return f"![{m.group('alt')}]({dest_rel}/{new_name})"
+
+    return IMAGE_REF_RE.sub(replace, text), rewrites
+
+
+def strip_dangling_refs(text: str, md_path: Path) -> Tuple[str, List[str]]:
+    """Remove every local image reference whose file is not on disk.
+
+    Returns (text, stripped_targets). Remote references are left alone: this
+    module makes no claim about the internet. The stripped reference is
+    replaced by an HTML comment, which renders as nothing and keeps the fact
+    that something was dropped recoverable by a human.
+    """
+    stripped: List[str] = []
+
+    def replace(m: re.Match) -> str:
+        target = _split_link_target(m.group("inner"))
+        if not is_local_target(target):
+            return m.group(0)
+        if resolve_target(md_path, target).exists():
+            return m.group(0)
+        stripped.append(target)
+        return STRIPPED_REF_COMMENT.format(target=target)
+
+    return IMAGE_REF_RE.sub(replace, text), stripped
+
+
+def build_asset_manifest(md_path: Path, asset_dir=None) -> List[dict]:
+    """Describe every asset this conversion wrote, and what points at it.
+
+    `asset_dir` is a directory (or an iterable of directories) to sweep for
+    assets that exist but are referenced by nothing.
+
+    One entry per file, whether or not anything references it (an extracted
+    but unreferenced asset is information too), plus one entry per referenced
+    file that lives outside `asset_dir`. Paths are relative to the markdown
+    file, so a consumer can relocate assets and rewrite references without
+    knowing anything about how a backend names its files — which is the whole
+    point: `_page_N_Figure_M.jpeg` is marker's business, not a contract.
+
+    Entry shape:
+        {"path": "Book_images/_page_64_Figure_7.jpeg",
+         "bytes": 48213,
+         "references": [{"target": "...", "alt": "...", "line": 812}]}
+    """
+    md_path = Path(md_path)
+    if not md_path.exists():
+        return []
+    md_dir = md_path.parent
+    text = md_path.read_text(encoding="utf-8", errors="replace")
+
+    # Referenced files first, keyed by resolved path so two spellings of the
+    # same file (`x.png` and `./x.png`) land on one entry.
+    refs_by_file: Dict[Path, List[dict]] = {}
+    for ref in iter_image_refs(text):
+        if not is_local_target(ref.target):
+            continue
+        resolved = resolve_target(md_path, ref.target)
+        if not resolved.exists():
+            continue          # invariant already swept these; belt and braces
+        refs_by_file.setdefault(resolved.resolve(), []).append(
+            {"target": ref.target, "alt": ref.alt, "line": ref.line}
+        )
+
+    files: List[Path] = list(refs_by_file)
+    candidates = ([asset_dir] if isinstance(asset_dir, (str, Path))
+                  else list(asset_dir or []))
+    for candidate in candidates:
+        if not Path(candidate).is_dir():
+            continue
+        for path in collect_asset_files(candidate):
+            if path.resolve() not in refs_by_file:
+                files.append(path.resolve())
+
+    manifest: List[dict] = []
+    for path in sorted(set(files)):
+        try:
+            rel = path.relative_to(md_dir.resolve())
+            rel_str = rel.as_posix()
+        except ValueError:
+            rel_str = path.as_posix()
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        manifest.append({
+            "path": rel_str,
+            "bytes": size,
+            "references": refs_by_file.get(path, []),
+        })
+    return manifest
+
+
+def count_dangling_refs(md_path: Path) -> int:
+    """How many local image references in `md_path` point at nothing.
+
+    The invariant says this is 0 for every conversion BookConvert emits. It
+    exists so a test — and a suspicious operator — can assert that directly.
+    """
+    md_path = Path(md_path)
+    if not md_path.exists():
+        return 0
+    text = md_path.read_text(encoding="utf-8", errors="replace")
+    return sum(
+        1 for ref in iter_image_refs(text)
+        if is_local_target(ref.target)
+        and not resolve_target(md_path, ref.target).exists()
+    )
+
+
+def enforce_reference_invariant(md_path: Path) -> List[str]:
+    """Strip every dangling local image reference from `md_path`, in place.
+
+    Returns the targets that were stripped. Writing only happens when
+    something changed, so this is a cheap no-op on the common case (a
+    text-only conversion, or one where every asset landed).
+    """
+    md_path = Path(md_path)
+    if not md_path.exists():
+        return []
+    text = md_path.read_text(encoding="utf-8", errors="replace")
+    swept, stripped = strip_dangling_refs(text, md_path)
+    if stripped:
+        md_path.write_text(swept, encoding="utf-8", errors="replace")
+    return stripped

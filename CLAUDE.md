@@ -20,15 +20,16 @@ The marginal cost of completeness is near zero with AI. Do the whole thing. Do i
 6. `--method docling` (Python 3.10+, use `.venv-marker`) — IBM's layout-aware pipeline
 7. `--method ocr` or `--ocr` — tesseract OCR for scanned/image-based PDFs
 8. EPUB files always route through pandoc regardless of `--method`. If the epub carries no semantic `h1`–`h6`, `epub_structure.py` derives headings from the book's own nav (`toc.ncx` / EPUB 3 nav doc), falling back to a chapter-ish CSS-class heuristic, and hands pandoc a rewritten copy from a temp dir (the source is never modified). The sidecar always declares `heading_source` (`semantic` | `nav` | `class-heuristic` | `none`) and `headings_emitted`
-9. Add `--extract-images` (pymupdf backend only) to render figures, diagrams, and raster images as PNGs in a sibling `<stem>_assets/` dir with inline markdown references
+9. **Figure extraction is on by default on every PDF backend.** Figures land in a sibling `<stem>_assets/` (pymupdf) or `<stem>_images/` (marker, pymupdf4llm) dir with inline markdown references. `--no-extract-images` converts text only and *strips* the references to the skipped figures rather than leaving them dangling. The invariant — **the output never contains a reference to a file that does not exist** — holds on every backend under every flag combination; `docs/asset-invariant.md` explains why it did not for a year
 10. A verbatim-safe **cleanup pass runs by default** on every conversion (`cleanup.py`): it de-joins dropped-space function-word joins ("thefrozen" -> "the frozen"), fixes stray-consonant citation ghosts ("—wWilliam" -> "—William"), and unwraps picture-text TOC tables while dropping OCR garble blocks. Pass `--no-clean` to skip it. The de-join needs `pyspellchecker` (in `requirements.txt`) and degrades gracefully if absent (dictionary-free repairs still run; a warning is recorded).
-11. Every conversion writes a `<stem>.report.json` sidecar: method, page counts, OCR pages, extracted assets, quality score, `cleaned`/`cleanup` stats, heading signals (EPUB), warnings
+11. Every conversion writes a `<stem>.report.json` sidecar: method, page counts, OCR pages, extracted assets, the **asset manifest** (`assets`: every file written, with the references pointing at it) and `dangling_refs_stripped`, quality score, `cleaned`/`cleanup` stats, heading signals (EPUB), warnings
 12. Converted markdown files appear in `output/`
 
 ## When helping users
 
 - If a conversion produces poor results (garbled text, missing content), first try `--method pymupdf4llm` (Python 3.10+), then `--method ocr`; `--auto-ocr` auto-retries with tesseract/marker on quality failure
-- For visually heavy books (diagrams, figures), use `--extract-images` or `--method pymupdf4llm` — both produce PNGs for figures
+- For visually heavy books (diagrams, figures), the default already keeps the figures; `--method marker` finds the most of them
+- **Never tell a consumer to pattern-match an asset filename.** `_page_N_Figure_M.jpeg` is marker's private convention. Relocating assets is done from the sidecar's `assets` manifest — `path` plus `references[].target` — which is stable across backends and across marker versions
 - If OCR output needs cleanup, help the user clean up the markdown: fix obvious OCR errors, add proper headings, remove page artifacts
 - Keep the markdown header format: title, "Converted from PDF" note, source filename, then `---` separator
 - Use `<!-- Page N -->` comments to mark page boundaries

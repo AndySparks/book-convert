@@ -1,6 +1,6 @@
 # Paper Extraction Research
 
-Survey of tools that handle academic-paper PDF → text conversion, focused on how each tool tackles the column-layout problem and what BookConvert could borrow.
+Survey of tools that handle academic-paper PDF → text conversion, focused on how each tool tackles the column-layout problem and what sourceconvert could borrow.
 
 **Our constraints:**
 - Default venv is Python 3.9 (marker-pdf and several modern tools require 3.10+).
@@ -163,8 +163,8 @@ Survey of tools that handle academic-paper PDF → text conversion, focused on h
 - Hit-or-miss on older / non-STEM papers. We'd need to test on our corpus.
 
 **What we can borrow.**
-- The element-typing idea is worth adding to BookConvert's post-processing: when we emit a line, we already know from geometry whether it's a running header, body, or full-width block. We could expose that as semantic markdown (H1/H2/H3) more systematically.
-- Their fallback cascade (fast → hi_res → OCR) is a good pattern for BookConvert's existing `pymupdf → marker → ocr` structure.
+- The element-typing idea is worth adding to sourceconvert's post-processing: when we emit a line, we already know from geometry whether it's a running header, body, or full-width block. We could expose that as semantic markdown (H1/H2/H3) more systematically.
+- Their fallback cascade (fast → hi_res → OCR) is a good pattern for sourceconvert's existing `pymupdf → marker → ocr` structure.
 
 **Verdict.** A viable alternative to marker for users who prefer a more mainstream Python dep. Worth a mention in the decision doc but not worth making it the default when marker is available.
 
@@ -233,7 +233,7 @@ Survey of tools that handle academic-paper PDF → text conversion, focused on h
 
 ---
 
-## Specific recommendations for BookConvert
+## Specific recommendations for sourceconvert
 
 1. **Default path stays PyMuPDF + our enhanced column detection** (Approach B). It works in Python 3.9, has no external deps, and already handles 43/43 of our corpus as of the checkpoint commit.
 

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.7+, PyMuPDF (fitz), pytest (new dev dependency), `/usr/share/dict/words` (BSD/macOS/Linux system wordlist)
 
-**Related docs:** `docs/quality-fallback-design.md`, issue AndySparks/book-convert#17
+**Related docs:** `docs/quality-fallback-design.md`, issue AndySparks/sourceconvert#17
 
 ---
 
@@ -630,7 +630,7 @@ the existing 'scanned' match, so degraded extractions (e.g. PDFs with
 non-standard font encodings like The Pyramid Principle) now route to
 OCR automatically instead of silently shipping garbled output.
 
-Fixes AndySparks/book-convert#17
+Fixes AndySparks/sourceconvert#17
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
 EOF
@@ -808,7 +808,7 @@ If the repo has CI configured (check `.github/workflows/`), wait for it to go gr
 - [ ] **Step 2: Close issue #17 with a reference to the fix commit**
 
 ```bash
-gh issue close 17 --repo AndySparks/book-convert --comment "Fixed by the quality-gated OCR auto-fallback. See commit message on main for details; design doc at docs/quality-fallback-design.md."
+gh issue close 17 --repo AndySparks/sourceconvert --comment "Fixed by the quality-gated OCR auto-fallback. See commit message on main for details; design doc at docs/quality-fallback-design.md."
 ```
 
 - [ ] **Step 3: Announce completion to the user**

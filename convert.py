@@ -3466,6 +3466,29 @@ def convert_with_marker(pdf_path, output_dir, marker_args=None,
         # Newer marker-pdf releases (≥1.0) take the output path via the
         # `--output_dir` flag rather than as a second positional argument.
         # Passing it positionally raises "Got unexpected extra argument".
+        # Validate the interpreter here, at the spawn, and not only in
+        # check_dependencies() -- which `--skip-check` skips, and which every
+        # documented invocation passes (`ingest-batch.sh`, and four places in
+        # source-ingestion.md). A guard that only covers the path nobody takes
+        # is not a guard. Proven on 2026-07-29: sourceconvert moved to
+        # ~/conductor/repos, all 125 venv scripts kept pointing at the old
+        # location, and the check added that same morning could not fire.
+        _marker_path = shutil.which("marker_single")
+        if _marker_path:
+            _dead = _stale_shebang(_marker_path)
+            if _dead is not None:
+                _old_root = _dead.split("/.venv")[0]
+                raise ConversionError(
+                    f"`{_marker_path}` points at an interpreter that does not exist:\n"
+                    f"    {_dead}\n"
+                    "  The venv was built at a different path — this is what a moved or\n"
+                    "  renamed project directory looks like. Repair the venv's absolute\n"
+                    "  paths (shebangs, and VIRTUAL_ENV in the activate scripts):\n"
+                    f"    OLD={_old_root}\n"
+                    "    NEW=$(pwd)\n"
+                    '    grep -rl "$OLD" .venv/bin .venv-marker/bin '
+                    '| while read f; do sed -i "" "s|$OLD|$NEW|g" "$f"; done'
+                )
         cmd = ["marker_single", str(pdf_path), "--output_dir", tmpdir]
         # Page-locator flags go on unconditionally: a source filed without a
         # citable address cannot be fixed later without reconverting, and

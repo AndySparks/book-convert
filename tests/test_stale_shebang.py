@@ -104,3 +104,45 @@ def test_check_dependencies_raises_on_stale_marker(tmp_path, monkeypatch):
     msg = str(exc.value)
     assert "bad interpreter" in msg
     assert dead in msg
+
+
+# --- the guard must cover the path people actually take --------------------
+
+def test_marker_spawn_rejects_a_dead_interpreter_even_with_skip_check(tmp_path, monkeypatch):
+    """`--skip-check` skips check_dependencies, so the spawn must check too.
+
+    Every documented invocation passes --skip-check: mc-wiki's
+    ingest-batch.sh and four places in source-ingestion.md. When sourceconvert
+    moved to ~/conductor/repos on 2026-07-29, all 125 venv scripts kept
+    pointing at the old location and the check added that same morning could
+    not fire, because it lived behind the flag everyone sets.
+    """
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    dead = "/Users/nobody/Documents/Claude/projects/sourceconvert/.venv-marker/bin/python3.12"
+    s = fake_bin / "marker_single"
+    s.write_text(f"#!{dead}\n")
+    s.chmod(0o755)
+    monkeypatch.setenv("PATH", str(fake_bin))
+
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+
+    with pytest.raises(convert.ConversionError) as exc:
+        convert.convert_with_marker(pdf, tmp_path / "out")
+
+    msg = str(exc.value)
+    assert dead in msg
+    # The repair hint must name the old root so the sed is copy-pasteable.
+    assert "/Users/nobody/Documents/Claude/projects/sourceconvert" in msg
+
+
+def test_marker_spawn_allows_a_healthy_interpreter(tmp_path, monkeypatch):
+    """The guard must not block a working marker: no raise before spawn."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    s = fake_bin / "marker_single"
+    s.write_text(f"#!{sys.executable}\n")
+    s.chmod(0o755)
+    monkeypatch.setenv("PATH", str(fake_bin))
+    assert convert._stale_shebang(s) is None

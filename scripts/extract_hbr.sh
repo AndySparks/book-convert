@@ -1,9 +1,9 @@
 #!/bin/bash
 # Extract individual HBR articles from the collection into ~/Vaults/Wiki/raw/
 
-SRC="/Users/andysparks/Documents/Claude/projects/sourceconvert/output/HBR_s 10 Must Reads for New Managers Collection.md"
+SRC="/Users/andysparks/conductor/repos/sourceconvert/output/HBR_s 10 Must Reads for New Managers Collection.md"
 RAW="$HOME/Vaults/Wiki/raw"
-CONVERT="/Users/andysparks/Documents/Claude/projects/sourceconvert/convert.py"
+CONVERT="/Users/andysparks/conductor/repos/sourceconvert/convert.py"
 COUNT=0
 
 # Step 1: Save full collection as one raw file

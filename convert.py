@@ -3543,7 +3543,20 @@ def convert_with_marker(pdf_path, output_dir, marker_args=None,
         # before the TemporaryDirectory takes them to the grave. A previous
         # conversion of the same book owns nothing here, so clear the
         # directory rather than merging two runs' assets into it.
-        img_dest = output_dir / f"{pdf_path.stem}_images"
+        # Spaces are squeezed out of the asset directory name, matching what the
+        # pymupdf4llm backend already does. A space in the directory makes every
+        # reference marker emits unusable: `![](A Spaced Name_images/x.jpeg)` is
+        # not a valid CommonMark link destination, and consumers stop at the
+        # first whitespace — mc-wiki's check-figures.py captures only "A" and
+        # reports the figure dangling, while the file sits on disk beside it.
+        #
+        # Percent-encoding and angle-bracket wrapping are both more standards-
+        # correct and both wrong here: that consumer resolves a ref as a literal
+        # path with no URL-decoding, so either would still fail to find the file.
+        # Renaming the directory is the only fix that needs no consumer changed,
+        # and the name is generated rather than meaningful.
+        safe_stem = re.sub(r"\s+", "_", pdf_path.stem)
+        img_dest = output_dir / f"{safe_stem}_images"
         if img_dest.exists():
             shutil.rmtree(str(img_dest))
 

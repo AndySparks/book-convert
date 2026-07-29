@@ -107,6 +107,25 @@ def check_dependencies(method):
                 "Missing dependency: marker-pdf (pip install marker-pdf).\n"
                 f"  Looked for `marker_single` in {venv_bin} and on PATH."
             )
+        # The binary exists -- but a venv console script hardcodes its
+        # interpreter, so "exists" is not "runnable" after a directory rename.
+        # Check before a long conversion rather than after it fails to start.
+        _found = marker_bin if marker_bin.exists() else Path(marker_on_path)
+        _dead = _stale_shebang(_found)
+        if _dead is not None:
+            _bin_dir = _found.parent
+            raise DependencyError(
+                f"`{_found}` points at an interpreter that does not exist:\n"
+                f"    {_dead}\n"
+                "  This is what a moved or renamed project directory looks like -- the\n"
+                "  script is present but every spawn fails with `bad interpreter`.\n"
+                "  Repair the shebangs in place (line 1 only):\n"
+                f"    grep -rl '{_dead}' {_bin_dir} | while read f; do \\\n"
+                f"      sed -i '' \"1s|{_dead}|$(command -v python3)|\" \"$f\"; done\n"
+                "  Or rebuild the venv from scratch:\n"
+                f"    python3.12 -m venv --clear {_bin_dir.parent} && "
+                f"{_bin_dir}/pip install marker-pdf"
+            )
         # If the venv-sibling binary exists but isn't on PATH, add it so
         # convert_with_marker() can spawn it via plain subprocess.run.
         if marker_bin.exists() and marker_on_path is None:
@@ -194,6 +213,42 @@ def check_dependencies(method):
                 "Missing dependency: pandoc (brew install pandoc)\n"
                 "  EPUB conversion uses pandoc to preserve chapter structure."
             )
+
+
+def _stale_shebang(script_path):
+    """Return the dead interpreter path if `script_path`'s shebang is broken.
+
+    A venv console script hardcodes an absolute interpreter path on line 1.
+    Move or rename the project directory and every one of those scripts keeps
+    pointing at the old location: the file still exists, `shutil.which` still
+    finds it, and it still fails the moment it is spawned, with a `bad
+    interpreter` error from the kernel that never mentions the rename.
+
+    That is not hypothetical. Renaming BookConvert to sourceconvert on
+    2026-07-28 left 73 stale scripts in `.venv-marker/bin` and 42 in
+    `.venv/bin`, and the next ingest died instantly on `marker_single`. The
+    existence check above cannot catch it, so it is checked here.
+
+    Returns None when the shebang is fine, unreadable, or not a shebang at
+    all -- this is a diagnostic, and it must never be the reason a working
+    conversion refuses to start.
+    """
+    try:
+        with open(script_path, "rb") as fh:
+            first = fh.readline(512)
+    except OSError:
+        return None
+    if not first.startswith(b"#!"):
+        return None
+    line = first[2:].decode("utf-8", "replace").strip()
+    if not line:
+        return None
+    # `#!/usr/bin/env python3` delegates the lookup to env -- nothing absolute
+    # to verify, and env will resolve it against PATH at spawn time.
+    interp = line.split()[0]
+    if not interp.startswith("/") or Path(interp).name == "env":
+        return None
+    return None if Path(interp).exists() else interp
 
 
 def _marker_available():
@@ -1377,8 +1432,33 @@ def _strip_marker_page_furniture(page_text, header_lines, footer_lines):
                 return folio
         return None
 
-    folio = (first_folio(head_band)
-             or first_folio(foot_band)
+    # A page that lists page numbers — a contents or index page — carries
+    # several lines that are shaped exactly like a folio and are not one. The
+    # standing-alone preference below is right everywhere else and exactly
+    # backwards here: on What Works sheet 7 the head band holds both
+    # `viii Contents` (the real running head, real folio) and a bare `44` from
+    # the listing, and the bare number wins.
+    #
+    # Plurality is the discriminator, and it is a strong one: a page has one
+    # folio, so a second standalone folio-shaped line means at least one of
+    # them is not a folio, and nothing about shape says which. Measured over
+    # the four books ingested 2026-07-29, no body page anywhere reached two —
+    # the rule fires only on the four What Works contents pages and one
+    # Landsberg index page, whose captured value interpolation reproduces
+    # exactly. So this cannot alter a book that does not list page numbers.
+    #
+    # When it fires, fall through to the running-head folio, which is
+    # corroborated by recurring furniture and is therefore still trustworthy.
+    # If there is none, capture nothing and let interpolation fill the page:
+    # an honest gap beats a confident wrong number.
+    bare_folio_lines = sum(1 for l in page_text.split('\n')
+                           if _is_marker_folio(l.strip()))
+    lists_page_numbers = bare_folio_lines > 1
+
+    folio = None
+    if not lists_page_numbers:
+        folio = first_folio(head_band) or first_folio(foot_band)
+    folio = (folio
              or first_embedded_folio(head_band, header_lines)
              or first_embedded_folio(foot_band, footer_lines))
 

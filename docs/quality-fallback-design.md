@@ -1,6 +1,6 @@
 # Quality-Gated OCR Auto-Fallback Design
 
-**Issue:** AndySparks/book-convert#17
+**Issue:** AndySparks/sourceconvert#17
 **Date:** 2026-04-09
 **Status:** Design approved, implementation in progress
 **Revision 2026-04-09:** Scorer redesigned mid-implementation. Wordlist-based

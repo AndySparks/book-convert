@@ -1,5 +1,16 @@
 # BookConvert Improvements Implementation Plan
 
+> **COMPLETED 2026-04. This is a record, not live work — do not execute it.**
+> Every deliverable shipped: `assets.py`, `report.py`, the `pymupdf4llm` and
+> `docling` backends, the JSON sidecar and the per-backend requirements files
+> all exist on `main`. The instruction below is preserved as authored and no
+> longer applies.
+>
+> The title and filename say **BookConvert** because that was the project's name
+> when this was written; it is `sourceconvert` now
+> (`8-DECISIONS/2026-07-28-rename-to-sourceconvert.md`). History is preserved as
+> authored, so the old name stands here rather than being rewritten.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a pymupdf4llm backend, a Docling backend, a figure/image extraction pipeline, a JSON sidecar conversion report, better OCR routing, and an extras-style install path for heavy ML backends. Close the biggest quality gap surfaced by the `Dont Make Me Think` run (graphics flattened into text) and give BookConvert a second-opinion backend for visual-heavy books.

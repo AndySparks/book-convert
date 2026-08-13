@@ -3713,13 +3713,28 @@ def _clean_pandoc_output(body):
     return body.strip() + "\n"
 
 
-def convert_with_pandoc(book_path, output_dir):
+def convert_with_pandoc(book_path, output_dir, extract_images=None):
     """Convert an EPUB to markdown via pandoc.
 
     Pandoc maps epub chapter structure to markdown headings, so the
     output keeps the book's natural reading order without page markers.
-    Images are referenced but not extracted (sourceconvert is a text-only
-    pipeline; pulling images would inflate output and break offline use).
+
+    Images are **not** extracted unless `extract_images` is explicitly True.
+    The default is off because an epub's images are overwhelmingly publisher
+    furniture. Measured across five books on 2026-08-13: Groundedness 7 images,
+    all furniture (Penguin logos, cover, title page, stock photos); Master of
+    Change 3, all furniture; What Editors Do 5, all furniture; Way of Excellence
+    4, two of them probable figures. Extracting by default would inflate every
+    epub conversion to recover almost nothing.
+
+    But `Peak Performance` in that same batch carried 11 images of which **7
+    were page-numbered figures**, and under a hard-coded text-only rule they
+    were unrecoverable without knowing to re-run pandoc by hand. Hence the
+    escape hatch: `--extract-images` used to be documented as on-by-default
+    while this path silently ignored it, so the flag lied. Passing it now works
+    here, and `_finalize_assets` harvests the media exactly as the marker path
+    does. Unspecified (None) keeps the text-only default.
+
     Returns a ConversionReport and writes the sidecar, like every other
     backend; its `page_numbering` is always "none" because an epub is
     reflowable and has no pages to address.
@@ -3741,6 +3756,7 @@ def convert_with_pandoc(book_path, output_dir):
     title = clean_title(book_path.stem)
     output_file = output_dir / f"{book_path.stem}.md"
 
+    media_scratch = None
     with tempfile.NamedTemporaryFile(
         suffix=".md", delete=False
     ) as tmp:
@@ -3770,19 +3786,23 @@ def convert_with_pandoc(book_path, output_dir):
             # `<span>`/`<div>`/`<img>` layout scaffolding that pandoc would
             # otherwise preserve verbatim; disabling raw_html makes pandoc
             # flatten those tags to their text content instead.
-            result = subprocess.run(
-                [
-                    "pandoc",
-                    "--from=epub",
-                    "--to=gfm-raw_html",
-                    "--wrap=none",
-                    str(convert_path),
-                    "-o",
-                    str(tmp_path),
-                ],
-                capture_output=True,
-                text=True,
-            )
+            cmd = [
+                "pandoc",
+                "--from=epub",
+                "--to=gfm-raw_html",
+                "--wrap=none",
+            ]
+            # `--extract-media` writes the epub's media next to nothing useful
+            # and rewrites every reference to point inside it, so it has to land
+            # somewhere that outlives this `with` block: `_finalize_assets`
+            # harvests it after the body is written, exactly as it does for
+            # marker's scratch tree. Only when extraction was asked for
+            # explicitly -- see the docstring for why epub defaults off.
+            if extract_images:
+                media_scratch = Path(tempfile.mkdtemp(prefix="sourceconvert-epub-media-"))
+                cmd.append(f"--extract-media={media_scratch}")
+            cmd += [str(convert_path), "-o", str(tmp_path)]
+            result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
                 raise ConversionError(
                     f"pandoc error: {result.stderr.strip() or 'unknown failure'}"
@@ -3852,7 +3872,23 @@ def convert_with_pandoc(book_path, output_dir):
     # overwhelmingly publisher furniture — covers, ornaments, imprint marks —
     # and sourceconvert's epub path is documented as text-only. So epub takes
     # the other route to the same invariant: the references are stripped.
-    _finalize_assets(report)
+    #
+    # When --extract-images IS passed, pandoc has written the media into
+    # `media_scratch` and repointed the body at it; hand both to
+    # `_finalize_assets` and it harvests them beside the markdown, strips
+    # anything still dangling, and writes the manifest -- the same three steps
+    # the marker path gets.
+    if media_scratch is not None:
+        safe_stem = re.sub(r"\s+", "_", book_path.stem)
+        img_dest = output_dir / f"{safe_stem}_images"
+        if img_dest.exists():
+            shutil.rmtree(str(img_dest))
+        try:
+            _finalize_assets(report, scratch_root=media_scratch, asset_dir=img_dest)
+        finally:
+            shutil.rmtree(str(media_scratch), ignore_errors=True)
+    else:
+        _finalize_assets(report)
     write_report(output_file.with_suffix(".report.json"), report)
     return report
 
@@ -4218,16 +4254,32 @@ def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False,
     EPUB files route through pandoc regardless of `method`. For PDFs,
     if auto_ocr is True and pymupdf/marker fails due to scanned content,
     automatically retries with OCR.
-    `extract_images` defaults to True: every PDF backend writes the figures
-    it finds. Setting it False converts text only and strips the references
-    to the figures that were skipped, so the output never dangles either way
-    (issue #34).
+    `extract_images` is tri-state, because the right default differs by
+    format. **None (unspecified)** means "use the format's default": every PDF
+    backend writes the figures it finds, and epub does not, since an epub's
+    images are overwhelmingly publisher furniture (see `convert_with_pandoc`).
+    **True** forces extraction everywhere, including epub -- the escape hatch
+    for an epub that really does carry figures. **False** converts text only.
+    Either way the references to skipped figures are stripped, so the output
+    never dangles (issue #34).
+
+    The resolution happens here rather than in each backend so that None can
+    never reach one: every PDF backend tests the flag with a plain truthiness
+    check, and None is falsy, so passing it straight through would silently
+    disable PDF image extraction while looking like a default.
     When clean is True (default), a verbatim-safe post-conversion pass repairs
     common extraction artifacts (dropped-space joins, stray-consonant citation
     ghosts, picture-text garble) on the emitted markdown.
     `marker_args` is forwarded to the marker backend only; other backends
     ignore it.
     """
+    # None means "not specified". Resolve it for the PDF backends here: they
+    # test the flag with `if extract_images:` / `if not extract_images:`, and
+    # None is falsy, so an unresolved None would turn image extraction OFF for
+    # every PDF while reading like a default. Caught by converting a PDF and
+    # finding no assets directory.
+    pdf_extract_images = True if extract_images is None else extract_images
+
     book_path = Path(book_path)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -4246,20 +4298,23 @@ def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False,
             # epub's HTML, which carries none of those defects, so running
             # the pass would be spending a dictionary sweep on text that
             # cannot need it.
-            return bool(convert_with_pandoc(book_path, output_dir))
+            # epub keeps the raw tri-state: None means text-only here.
+            return bool(convert_with_pandoc(book_path, output_dir,
+                                             extract_images=extract_images))
         if method == "ocr":
             result = convert_with_ocr(book_path, output_dir)
         elif method == "marker":
             result = convert_with_marker(book_path, output_dir,
                                          marker_args=marker_args,
-                                         extract_images=extract_images)
+                                         extract_images=pdf_extract_images)
         elif method == "pymupdf4llm":
             result = convert_with_pymupdf4llm(book_path, output_dir,
-                                              extract_images=extract_images)
+                                              extract_images=pdf_extract_images)
         elif method == "docling":
             result = convert_with_docling(book_path, output_dir)
         else:
-            result = convert_with_pymupdf(book_path, output_dir, extract_images=extract_images)
+            result = convert_with_pymupdf(book_path, output_dir,
+                                          extract_images=pdf_extract_images)
         # Backends return either True (legacy) or a ConversionReport.
         # Treat any non-False truthy value as success.
         if clean:
@@ -4281,7 +4336,7 @@ def convert_book(book_path, output_dir, method="pymupdf", auto_ocr=False,
                 if chosen == "marker":
                     result = convert_with_marker(book_path, output_dir,
                                                  marker_args=marker_args,
-                                                 extract_images=extract_images)
+                                                 extract_images=pdf_extract_images)
                 else:
                     result = convert_with_ocr(book_path, output_dir)
                 if clean:
@@ -4441,13 +4496,17 @@ def main():
     parser.add_argument(
         "--extract-images",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=None,
         help="Write figures, diagrams, and raster images alongside the "
-             "markdown. ON by default: a backend that emits a reference to a "
-             "figure has already done the work of finding it, and throwing "
-             "the file away is pure loss. --no-extract-images converts text "
-             "only — the references to the discarded figures are stripped, "
-             "never left dangling.",
+             "markdown. ON by default for the PDF backends: a backend that "
+             "emits a reference to a figure has already done the work of "
+             "finding it, and throwing the file away is pure loss. "
+             "--no-extract-images converts text only — the references to the "
+             "discarded figures are stripped, never left dangling. "
+             "EPUB is the exception and defaults OFF, because an epub's images "
+             "are overwhelmingly publisher furniture (covers, imprint marks, "
+             "promo cards); pass --extract-images explicitly to harvest them "
+             "from an epub that really does carry figures.",
     )
     parser.add_argument(
         "--marker-args",

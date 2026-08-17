@@ -75,6 +75,24 @@ python3.12 -m venv .venv-marker
 .venv-marker/bin/pip install -r requirements-docling.txt       # docling
 ```
 
+**`marker-pdf` also needs a system dependency pip cannot install:**
+
+```bash
+brew install llama.cpp
+```
+
+marker 2 runs Surya OCR 2 through a llama.cpp backend on CPU and MPS. Without the
+`llama-server` binary it aborts with `SpawnError: llama-server binary not found` —
+and that arrives at the *end* of a long conversion, which is the worst possible
+place to find out.
+
+**marker 2.0 is a floor, not a preference.** marker 1.10.2 hallucinates on blank
+pages: with nothing to transcribe it emits a repeating n-gram until it hits a token
+cap, writing ~2,046 characters of prose-shaped text that was never in the book. 2.0
+emits nothing on the same pages. If you are on 1.x, upgrade before converting
+anything you intend to quote. See
+[`8-DECISIONS/2026-08-17-marker-2-adoption.md`](8-DECISIONS/2026-08-17-marker-2-adoption.md).
+
 ### OCR backend
 
 ```bash

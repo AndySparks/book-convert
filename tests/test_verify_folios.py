@@ -175,3 +175,40 @@ def test_exit_codes_are_distinguishable():
     assert (clean["conclusive"], bool(clean["anomalies"])) == (True, False)
     assert (shifted["conclusive"], bool(shifted["anomalies"])) == (True, True)
     assert thin["conclusive"] is False
+
+
+# ── codex round 1, 2026-08-17: two verdicts that were confidently wrong ──────────────
+
+def test_a_misread_constant_is_not_a_clean_book():
+    """OCR lifts 'CHAPTER 4' out of the band on every page. Same number everywhere, so a
+    DIFFERENT offset on every page, so no segment, so no transition — and the tool used to
+    call that clean and exit 0 without having read one real folio. Read fraction cannot
+    see this; only the absence of an established offset can."""
+    r = analyse({i: 4 for i in range(20, 120)}, total_pages=140)
+    assert r["conclusive"] is False, "no stable offset must be inconclusive, never clean"
+    assert r["pages_in_established_runs"] == 0
+
+
+def test_far_apart_readings_do_not_form_a_run():
+    """Three pages agreeing at one offset with everything between them unread are three
+    coincidences, not a run. Chaining them manufactured a transition against a good book —
+    and contradicted this tool's own decision doc, which classes that pattern as noise."""
+    folios = {10: 3, 20: 13, 30: 23, **{i: i - 17 for i in range(40, 90)}}
+    r = analyse(folios, total_pages=140)
+    assert r["anomalies"] == []
+
+
+def test_a_small_gap_still_holds_a_segment_together():
+    """The other half: tesseract missing a few pages must not split a real book."""
+    folios = {i: i - 17 for i in range(20, 90) if i not in (40, 41, 42)}
+    r = analyse(folios, total_pages=140)
+    assert r["anomalies"] == []
+    assert r["conclusive"] is True
+
+
+def test_a_real_shift_survives_the_gap_rule():
+    """The gap rule must not have disarmed the detector it protects."""
+    folios = {**{i: i - 17 for i in range(20, 60)}, **{i: i - 25 for i in range(60, 110)}}
+    r = analyse(folios, total_pages=140)
+    assert len(r["anomalies"]) == 1
+    assert r["anomalies"][0]["shift"] == -8

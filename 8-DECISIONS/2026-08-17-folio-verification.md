@@ -78,6 +78,31 @@ that reads almost nothing and then reports no problem is worse than no check,
 because it is indistinguishable from a pass. "No shift found" and "no data" are
 different answers and get different exit codes.
 
+## Two ways to be confidently wrong, both found by review
+
+Independent review (codex) found that the first implementation could return either
+verdict falsely, which for a tool whose entire job is a verdict is the whole ballgame.
+Both are now regression tests.
+
+**False clean.** If OCR lifts a non-folio out of the band — `CHAPTER 4` on every
+page — every page reports the same number, so every page implies a *different*
+offset, so no segment forms, so no transition is found. The tool reported no shift
+and exited 0 without having read a single real folio. Read fraction cannot see
+this: the pages were read, they just said nothing. **A result is now conclusive
+only when some offset is ESTABLISHED** — supported by adjacent pages agreeing —
+and otherwise reports "no stable offset" and exits 2.
+
+**False anomaly.** Segments ignored index gaps entirely, so three pages agreeing at
+one offset on pages 10, 20 and 30 with everything between unread became an
+established run, and a transition was manufactured against a perfectly good book.
+That is the exact far-apart pattern this document already classified as noise, so
+the code contradicted its own spec. Segments now break across a gap larger than
+`MAX_SEGMENT_GAP`. Splitting a genuine segment costs nothing: two segments at the
+same offset yield no transition.
+
+The pair is the lesson. A verdict tool needs both failure directions tested, not
+just the one it was written to catch.
+
 ## Consequences
 
 - New optional dependency on `tesseract` for this tool only. `pytesseract` is used

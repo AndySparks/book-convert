@@ -73,6 +73,14 @@ MIN_ANOMALY_RUN = 3
 # reports no anomaly is worse than no check, because it looks like a pass.
 MIN_READ_FRACTION = 0.25
 
+# How many unread pages a single segment may span before its readings stop counting as
+# evidence about each other. A shift is physical: the pages it moves are contiguous. Three
+# readings agreeing at one offset on pages 10, 20 and 30 with everything between unread are
+# not a run, they are three coincidences — and treating them as a run manufactures a
+# transition against a perfectly good book (codex, 2026-08-17). Splitting a GENUINE segment
+# by this rule is harmless: two segments at the same offset yield no transition.
+MAX_SEGMENT_GAP = 5
+
 
 def _ocr(png_path: str) -> str:
     """OCR one band image. Prefers pytesseract (requirements-ocr.txt), falls back to the
@@ -157,12 +165,16 @@ def read_folios(pdf: str, dpi: int = 300, band: float = 0.11,
 def segments(offsets: dict[int, int]) -> list[list[int]]:
     """The read pages, in order, grouped into maximal runs that share one offset.
 
-    Index gaps are allowed inside a segment: pages whose margins yielded nothing are
-    simply absent, and a book does not become two books because tesseract missed page 84.
+    Small index gaps are allowed inside a segment — pages whose margins yielded nothing
+    are simply absent, and a book does not become two books because tesseract missed page
+    84. Gaps larger than MAX_SEGMENT_GAP do break the segment, because past that distance
+    the readings are no longer evidence about each other.
     """
     out: list[list[int]] = []
     for i in sorted(offsets):
-        if out and offsets[out[-1][-1]] == offsets[i]:
+        same_offset = out and offsets[out[-1][-1]] == offsets[i]
+        near = out and (i - out[-1][-1]) <= MAX_SEGMENT_GAP
+        if same_offset and near:
             out[-1].append(i)
         else:
             out.append([i])
@@ -209,6 +221,13 @@ def analyse(folios: dict[int, int], total_pages: int) -> dict:
     disagreeing = sorted(i for i, o in offsets.items() if o != dominant)
     anomalies = find_transitions(offsets)
     read_fraction = len(folios) / total_pages if total_pages else 0.0
+    # An offset is ESTABLISHED when adjacent pages agree on it. Without at least one, the
+    # readings are noise however many there are — the failure case is OCR grabbing a
+    # non-folio like "CHAPTER 4" off every page, which yields a different offset per page,
+    # no segment at all, no transitions, and therefore a confident exit 0 without a single
+    # real folio having been read (codex, 2026-08-17). Read fraction alone cannot see that.
+    established = [s for s in segments(offsets) if len(s) >= MIN_ANOMALY_RUN]
+    supported = sum(len(s) for s in established)
     return {
         "pages": total_pages,
         "folios_read": len(folios),
@@ -217,7 +236,8 @@ def analyse(folios: dict[int, int], total_pages: int) -> dict:
         "pages_at_dominant_offset": dominant_n,
         "disagreeing_pages": disagreeing,
         "anomalies": anomalies,
-        "conclusive": read_fraction >= MIN_READ_FRACTION,
+        "pages_in_established_runs": supported,
+        "conclusive": read_fraction >= MIN_READ_FRACTION and bool(established),
     }
 
 
@@ -227,10 +247,17 @@ def render(result: dict) -> str:
         f"({result['read_fraction']:.1%})",
     ]
     if not result["conclusive"]:
-        out.append(
-            f"  TOO FEW FOLIOS READ to draw a conclusion (floor is {MIN_READ_FRACTION:.0%}).\n"
-            f"  This is not a pass. Try --dpi 400, or a wider --band, or the scan is unnumbered."
-        )
+        if result["read_fraction"] < MIN_READ_FRACTION:
+            out.append(
+                f"  TOO FEW FOLIOS READ to draw a conclusion (floor is {MIN_READ_FRACTION:.0%}).\n"
+                f"  This is not a pass. Try --dpi 400, or a wider --band, or the scan is unnumbered."
+            )
+        else:
+            out.append(
+                "  NO STABLE OFFSET. Folios were read, but no run of adjacent pages agrees on\n"
+                "  one offset — the signature of OCR lifting a non-folio (a chapter number, a\n"
+                "  figure label) out of the margin band. This is not a pass. Try --band or --dpi."
+            )
         return "\n".join(out)
     out.append(
         f"  dominant offset {result['dominant_offset']:+d} "
@@ -294,8 +321,10 @@ def main() -> int:
 
     folios = read_folios(args.pdf, dpi=args.dpi, band=args.band,
                          pages=args.pages, progress=progress)
-    scanned = len(args.pages) if args.pages else total
-    result = analyse(folios, min(scanned, total))
+    # Intersect the requested range with the document, or a range running past EOF makes
+    # the denominator too large and turns a good read into a spurious "inconclusive".
+    scanned = len([i for i in args.pages if i < total]) if args.pages else total
+    result = analyse(folios, scanned)
     result["pdf"] = os.path.basename(args.pdf)
     result["folios"] = {str(k): v for k, v in sorted(folios.items())}
 

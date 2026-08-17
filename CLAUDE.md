@@ -36,6 +36,14 @@ The marginal cost of completeness is near zero with AI. Do the whole thing. Do i
 - The `clean_title()` function strips version markers (e.g., "V3") from filenames for cleaner titles
 - Inspect the `.report.json` sidecar to see what happened: `jq '.method,.extracted_assets,.quality_score' output/*.report.json`
 
+## Verifying a scan's page numbers
+
+`convert.py` reads printed folios where it can and **interpolates** the rest from a consensus offset. That leaves the output part measured and part computed, and nothing downstream can tell which is which. The failure it cannot survive is a **pagination shift** — an unnumbered plate section or bound-in map — because one constant offset is then applied over the top and every folio past it is smoothly, self-consistently wrong.
+
+`python verify_folios.py <pdf>` reads the folios back off the page images and reports it. Exit 0 no shift, 1 a shift (folios past it are suspect), **2 too few folios read to say anything — which is not a pass**. `--json` for a machine-readable verdict.
+
+A shift is detected as a **transition between two established offsets**, never as "the less common offset" — the latter inverts as soon as the shifted region is the larger one, and then the tool indicts the correct pages. See `8-DECISIONS/2026-08-17-folio-verification.md`.
+
 ## Post-Conversion Quality Check (REQUIRED)
 
 After every conversion run, automatically spot-check each converted file:

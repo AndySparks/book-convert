@@ -10,6 +10,40 @@ Conversion paths:
 - **OCR** (PDF): Tesseract OCR for scanned/image-based PDFs
 - **Pandoc** (EPUB): Preserves the epub's chapter structure as markdown headings
 
+## Verifying a scan's page numbers
+
+A scanned book's page numbers are part measurement and part arithmetic. `convert.py` reads
+the printed folio where it can and **interpolates** the rest from a consensus offset, which
+is the right call — a folio hidden under a fold should not leave a hole. But afterwards
+nothing tells you which numbers were read and which were computed, or whether the
+computation is right.
+
+The failure that matters is a **pagination shift**: an unnumbered plate section, a bound-in
+map, an inserted errata leaf. Every folio after it moves, and because one offset is applied
+across the whole book the output stays smooth, self-consistent, and wrong from that point
+on. A reader sent to page 214 finds page 206.
+
+`verify_folios.py` reads the folios back off the page images and reports whether the
+pagination is coherent:
+
+```bash
+python verify_folios.py input/book.pdf
+python verify_folios.py input/book.pdf --json folios.json   # machine-readable
+python verify_folios.py input/book.pdf --pages 0-99 --dpi 400
+```
+
+It distinguishes OCR noise from a real shift by shape, not by frequency: scattered pages
+disagreeing are misreads, while the offset *changing and holding* is a shift.
+
+| exit | meaning |
+|---|---|
+| 0 | no shift found |
+| 1 | the pagination shifts somewhere — folios past that point are suspect |
+| 2 | too few folios could be read to say anything. **Not a pass.** |
+
+Needs `tesseract` (`brew install tesseract`). `pytesseract` is used when installed
+(`requirements-ocr.txt`); otherwise the `tesseract` binary is called directly.
+
 ## Setup
 
 ### Default install (text-only extraction)

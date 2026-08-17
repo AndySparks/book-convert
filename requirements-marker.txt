@@ -1,5 +1,21 @@
 # Python 3.10+ only. Install into .venv-marker:
 #   python3.12 -m venv .venv-marker
 #   .venv-marker/bin/pip install -r requirements-marker.txt
+#
+# REQUIRES A SYSTEM DEPENDENCY that pip cannot install:
+#
+#   brew install llama.cpp        (macOS / Linux)
+#
+# marker 2 runs Surya OCR 2 through a llama.cpp backend on CPU and MPS, and aborts
+# with `SpawnError: llama-server binary not found` without it. That crash arrives at
+# the END of a long conversion, which is the worst place to discover a missing
+# dependency.
+#
+# The floor is 2.0 deliberately, not for features. marker 1.10.2 HALLUCINATES ON
+# BLANK PAGES: finding nothing to transcribe, it emits a repeating n-gram until it
+# hits a token cap, producing ~2,046 characters of prose-shaped text that was never
+# in the book. Measured across one 955-source corpus, 16 books carried 44 such
+# passages. 2.0 emits nothing on the same pages. See
+# 8-DECISIONS/2026-08-17-marker-2-adoption.md.
 -r requirements.txt
-marker-pdf
+marker-pdf>=2.0.0

@@ -36,6 +36,12 @@ The marginal cost of completeness is near zero with AI. Do the whole thing. Do i
 - The `clean_title()` function strips version markers (e.g., "V3") from filenames for cleaner titles
 - Inspect the `.report.json` sidecar to see what happened: `jq '.method,.extracted_assets,.quality_score' output/*.report.json`
 
+## marker 2.0 is the floor
+
+`requirements-marker.txt` pins `marker-pdf>=2.0.0`. marker 1.10.2 **hallucinates on blank pages** — finding nothing to transcribe it emits a repeating n-gram to a token cap, ~2,046 characters of prose-shaped text that was never in the book. Never assume a conversion from 1.x is clean; `mc-wiki/tools/check-degenerate-text.py` finds these.
+
+marker 2 needs `llama-server` (`brew install llama.cpp`) for its CPU/MPS backend, and fails at the END of a conversion without it. All flags `convert.py` passes (`--paginate_output`, `--keep_pageheader_in_output`, `--keep_pagefooter_in_output`, `--disable_image_extraction`, `--output_dir`) exist in 2.0 and were checked against its `--help`. See `8-DECISIONS/2026-08-17-marker-2-adoption.md`.
+
 ## Verifying a scan's page numbers
 
 `convert.py` reads printed folios where it can and **interpolates** the rest from a consensus offset. That leaves the output part measured and part computed, and nothing downstream can tell which is which. The failure it cannot survive is a **pagination shift** — an unnumbered plate section or bound-in map — because one constant offset is then applied over the top and every folio past it is smoothly, self-consistently wrong.

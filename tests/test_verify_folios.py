@@ -9,6 +9,9 @@ Both halves are covered, per the rule that a filter is only verified when the ba
 gone AND the legitimate population still passes: a book with scattered misreads must come
 back CLEAN, and a book with an inserted plate section must come back ANOMALOUS.
 """
+import json
+import sys
+
 import pytest
 
 from verify_folios import MIN_ANOMALY_RUN, analyse, find_transitions, folio_from_text
@@ -212,3 +215,100 @@ def test_a_real_shift_survives_the_gap_rule():
     r = analyse(folios, total_pages=140)
     assert len(r["anomalies"]) == 1
     assert r["anomalies"][0]["shift"] == -8
+
+
+# ── widening the band when the first pass cannot conclude ────────────────────────────
+
+def test_wider_bands_are_ordered_and_above_the_default():
+    from verify_folios import WIDER_BANDS
+    assert list(WIDER_BANDS) == sorted(WIDER_BANDS)
+    assert all(b > 0.11 for b in WIDER_BANDS), "a retry narrower than the default cannot help"
+
+
+def test_the_band_is_reported_so_a_verdict_can_be_reproduced():
+    """Two runs of the same book can now read different numbers of folios depending on the
+    band that succeeded. A verdict that does not say which band produced it cannot be
+    checked by anyone."""
+    from verify_folios import render
+    r = analyse(_clean_book(), total_pages=140)
+    r["band"] = 0.17
+    assert "margin band 0.17" in render(r)
+
+
+def test_widening_cannot_change_a_conclusive_verdict():
+    """The loop breaks on the first conclusive result, so a book that concludes at the
+    default band is never re-read at a wider one. Asserted on the predicate the loop uses,
+    because the loop itself needs a PDF."""
+    conclusive = analyse(_clean_book(), total_pages=140)
+    assert conclusive["conclusive"] is True
+    # A real shift must still be visible at the first band, not masked by a later retry.
+    shifted = analyse(
+        {**{i: i - 17 for i in range(20, 60)}, **{i: i - 25 for i in range(60, 110)}},
+        total_pages=140,
+    )
+    assert shifted["conclusive"] is True and len(shifted["anomalies"]) == 1
+
+
+def _fake_fitz(pages):
+    """A stand-in for PyMuPDF. main() opens the document only to count its pages."""
+    import types
+    doc = types.SimpleNamespace(page_count=pages, close=lambda: None)
+    return types.SimpleNamespace(open=lambda *a, **k: doc)
+
+
+def test_main_actually_retries_at_a_wider_band(tmp_path, monkeypatch, capsys):
+    """Drive the real loop in main().
+
+    The first attempt at this feature was a silent no-op: the patch that added the loop
+    failed to apply, so `--no-widen` existed and did nothing while the constants and the
+    render line were both present and tested. Every test passed. Nothing exercised main().
+
+    A test that cannot observe the behaviour it names is not a test of it — so this one
+    stubs read_folios per band and asserts the narrow band's answer is NOT what comes out.
+    """
+    import verify_folios as vf
+
+    calls = []
+
+    def fake_read_folios(pdf, dpi=300, band=0.11, pages=None, progress=None):
+        calls.append(band)
+        if band < 0.15:
+            return {i: 4 for i in range(0, 30)}          # no stable offset -> inconclusive
+        return {i: i - 17 for i in range(0, 100)}         # legible at the wider band
+
+    # fitz is imported INSIDE the functions, so the module object is what gets stubbed.
+    monkeypatch.setattr(vf, "read_folios", fake_read_folios)
+    monkeypatch.setitem(sys.modules, "fitz", _fake_fitz(140))
+    pdf = tmp_path / "book.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    out = tmp_path / "r.json"
+    monkeypatch.setattr(sys, "argv", ["verify_folios.py", str(pdf), "--quiet", "--json", str(out)])
+
+    rc = vf.main()
+    assert len(calls) > 1, "main() never retried — the widening loop is a no-op"
+    assert calls[0] < calls[1], "the retry must be WIDER than the first attempt"
+    assert rc == 0
+    result = json.loads(out.read_text())
+    assert result["conclusive"] is True
+    assert result["band"] == calls[-1]
+
+
+def test_no_widen_really_disables_the_retry(tmp_path, monkeypatch):
+    """A flag that does nothing is worse than no flag: it sends the operator to change
+    something that cannot help, and the tool keeps failing for the reason they just fixed."""
+    import verify_folios as vf
+
+    calls = []
+
+    def fake_read_folios(pdf, dpi=300, band=0.11, pages=None, progress=None):
+        calls.append(band)
+        return {i: 4 for i in range(0, 30)}
+
+    monkeypatch.setattr(vf, "read_folios", fake_read_folios)
+    monkeypatch.setitem(sys.modules, "fitz", _fake_fitz(140))
+    pdf = tmp_path / "book.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    monkeypatch.setattr(sys, "argv", ["verify_folios.py", str(pdf), "--quiet", "--no-widen"])
+
+    assert vf.main() == 2
+    assert calls == [0.11], "--no-widen must leave exactly one attempt"

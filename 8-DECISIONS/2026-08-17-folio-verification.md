@@ -103,6 +103,29 @@ same offset yield no transition.
 The pair is the lesson. A verdict tool needs both failure directions tested, not
 just the one it was written to catch.
 
+## Widening the band before giving up
+
+"Inconclusive" is the honest answer when the folios cannot be read, but it is only
+useful if it means *the book cannot be verified* rather than *the band was wrong*.
+
+`marrow-behind-the-executive-mask` is the case that separated those. At the default
+band it read 41 of 146 folios and reported inconclusive. Raising the DPI to 400
+changed nothing — 47 of 146 — because resolution was never the problem. Rendering a
+page and **looking at it** showed why: the folio sits at the end of the running head,
+"The Second Week: Emphasis on the Group • 101", about 13% down the page, and the
+band was the top 11%. It was cutting the folio off. At 0.17 the same scan yields 126
+folios at a constant offset of +1, matching the filed value exactly.
+
+So the tool now retries at wider bands when a pass cannot conclude. Widening runs
+only after an inconclusive result, so it can never turn one verdict into another —
+only "cannot say" into an answer. The band that produced a verdict is reported with
+it, because two runs of the same book can now read different numbers of folios and a
+result nobody can reproduce is not evidence.
+
+The general lesson is worth keeping: a diagnostic's own default can be the thing
+producing the null result, and no amount of turning the obvious knob (DPI) will show
+that. Looking at the artifact did.
+
 ## Consequences
 
 - New optional dependency on `tesseract` for this tool only. `pytesseract` is used

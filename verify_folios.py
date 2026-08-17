@@ -73,6 +73,20 @@ MIN_ANOMALY_RUN = 3
 # reports no anomaly is worse than no check, because it looks like a pass.
 MIN_READ_FRACTION = 0.25
 
+# Bands to try, in order, when the first pass cannot conclude. The default 0.11 is tuned to
+# a folio sitting in the outer margin; a running head set lower falls outside it and the
+# tool reports "inconclusive" on a book whose folios are perfectly legible.
+#
+# marrow-behind-the-executive-mask is the case. Its folio sits at the END of the running
+# head ("The Second Week: Emphasis on the Group  •  101"), about 13% down the page. At 0.11
+# the band cut it off and only 41 of 146 folios were read; the answer was "inconclusive",
+# which is honest but useless. Raising the DPI to 400 changed nothing, because resolution
+# was never the problem. At 0.17 the same scan yields 126 folios and a constant offset.
+#
+# Widening only ever runs when the pass BEFORE it could not conclude, so it cannot turn a
+# real verdict into a different one — only "cannot say" into an answer.
+WIDER_BANDS = (0.17, 0.24)
+
 # How many unread pages a single segment may span before its readings stop counting as
 # evidence about each other. A shift is physical: the pages it moves are contiguous. Three
 # readings agreeing at one offset on pages 10, 20 and 30 with everything between unread are
@@ -244,7 +258,8 @@ def analyse(folios: dict[int, int], total_pages: int) -> dict:
 def render(result: dict) -> str:
     out = [
         f"pages {result['pages']}, folios read {result['folios_read']} "
-        f"({result['read_fraction']:.1%})",
+        f"({result['read_fraction']:.1%})"
+        + (f", margin band {result['band']}" if result.get("band") else ""),
     ]
     if not result["conclusive"]:
         if result["read_fraction"] < MIN_READ_FRACTION:
@@ -256,7 +271,8 @@ def render(result: dict) -> str:
             out.append(
                 "  NO STABLE OFFSET. Folios were read, but no run of adjacent pages agrees on\n"
                 "  one offset — the signature of OCR lifting a non-folio (a chapter number, a\n"
-                "  figure label) out of the margin band. This is not a pass. Try --band or --dpi."
+                "  figure label) out of the margin band. This is not a pass. Wider bands were\n"
+                "  already tried; the folio may sit inside the text block, or there may be none."
             )
         return "\n".join(out)
     out.append(
@@ -302,6 +318,8 @@ def main() -> int:
                     help="fraction of page height treated as the margin band (default 0.11)")
     ap.add_argument("--pages", type=_parse_pages, default=None, help="e.g. 0-99")
     ap.add_argument("--json", dest="json_out", default=None)
+    ap.add_argument("--no-widen", action="store_true",
+                    help="do not retry at a wider margin band when the result is inconclusive")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
@@ -319,12 +337,28 @@ def main() -> int:
         if not args.quiet and i % 25 == 0:
             print(f"  ... page {i}", file=sys.stderr, flush=True)
 
-    folios = read_folios(args.pdf, dpi=args.dpi, band=args.band,
-                         pages=args.pages, progress=progress)
     # Intersect the requested range with the document, or a range running past EOF makes
     # the denominator too large and turns a good read into a spurious "inconclusive".
     scanned = len([i for i in args.pages if i < total]) if args.pages else total
-    result = analyse(folios, scanned)
+
+    # Widen the band and retry when a pass cannot conclude. See WIDER_BANDS: the common
+    # cause of "inconclusive" is a running head set lower than the default band, not
+    # anything wrong with the book, and raising the DPI does not touch it.
+    bands = [args.band] + ([] if args.no_widen else [b for b in WIDER_BANDS if b > args.band])
+    folios: dict[int, int] = {}
+    result: dict = {}
+    for attempt, band in enumerate(bands):
+        if attempt and not args.quiet:
+            print(f"  inconclusive at band {bands[attempt - 1]}; retrying at band {band}",
+                  file=sys.stderr, flush=True)
+        folios = read_folios(args.pdf, dpi=args.dpi, band=band,
+                             pages=args.pages, progress=progress)
+        result = analyse(folios, scanned)
+        result["band"] = band
+        # Only an inconclusive pass is retried, so widening can never turn one verdict
+        # into a different one — only "cannot say" into an answer.
+        if result["conclusive"]:
+            break
     result["pdf"] = os.path.basename(args.pdf)
     result["folios"] = {str(k): v for k, v in sorted(folios.items())}
 

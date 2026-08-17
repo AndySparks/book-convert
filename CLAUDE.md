@@ -42,6 +42,8 @@ The marginal cost of completeness is near zero with AI. Do the whole thing. Do i
 
 `python verify_folios.py <pdf>` reads the folios back off the page images and reports it. Exit 0 no shift, 1 a shift (folios past it are suspect), **2 too few folios read to say anything — which is not a pass**. `--json` for a machine-readable verdict.
 
+If the first pass cannot conclude it retries at a wider margin band (`--no-widen` to disable), because the common cause of "inconclusive" is a running head set lower than the default band rather than anything wrong with the book. Raising `--dpi` does not help that; widening does.
+
 A shift is detected as a **transition between two established offsets**, never as "the less common offset" — the latter inverts as soon as the shifted region is the larger one, and then the tool indicts the correct pages. See `8-DECISIONS/2026-08-17-folio-verification.md`.
 
 ## Post-Conversion Quality Check (REQUIRED)

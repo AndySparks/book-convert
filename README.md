@@ -35,6 +35,8 @@ python verify_folios.py input/book.pdf --pages 0-99 --dpi 400
 It distinguishes OCR noise from a real shift by shape, not by frequency: scattered pages
 disagreeing are misreads, while the offset *changing and holding* is a shift.
 
+If the first pass cannot conclude, the tool **retries at a wider margin band** before giving up. The default band assumes the folio sits in the outer margin; a running head set lower falls outside it, and the result is a useless "inconclusive" on a book whose folios are perfectly legible. `--no-widen` disables the retry. The band that produced a verdict is printed with it, so a result can be reproduced.
+
 | exit | meaning |
 |---|---|
 | 0 | no shift found |

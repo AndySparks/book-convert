@@ -64,13 +64,22 @@ jobs:
       - name: List the PR's changed files
         # Renames contribute BOTH sides: previous_filename too, so a code
         # file renamed into docs/ cannot read as docs-only (codex r1, P2).
+        # PR_LISTED_FILES counts the entries the endpoint actually returned
+        # (it caps at 3,000): the predicate compares it against the PR's
+        # changed_files count and fails closed on truncation (codex r2, P2).
         run: |
+          set -euo pipefail
           gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
-            --paginate --jq '.[] | .filename, (.previous_filename // empty)' > /tmp/changed-files.txt
-          echo "$(wc -l < /tmp/changed-files.txt) changed path(s) (renames counted on both sides)."
+            --paginate --jq '.[] | "F\t" + .filename, (if .previous_filename then "P\t" + .previous_filename else empty end)' \
+            > /tmp/changed-raw.txt
+          cut -f2- /tmp/changed-raw.txt > /tmp/changed-files.txt
+          listed=$(grep -c '^F' /tmp/changed-raw.txt || true)
+          echo "PR_LISTED_FILES=$listed" >> "$GITHUB_ENV"
+          echo "$listed entry(ies) listed; $(wc -l < /tmp/changed-files.txt) path(s) fed (renames counted on both sides)."
 
       - name: Require the AI-review section
         env:
           # Env var, never shell interpolation: the body is untrusted input.
           PR_BODY: ${{ github.event.pull_request.body }}
+          PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
         run: /tmp/check-ai-review.sh < /tmp/changed-files.txt

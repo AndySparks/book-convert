@@ -67,13 +67,17 @@ jobs:
         # PR_LISTED_FILES counts the entries the endpoint actually returned
         # (it caps at 3,000): the predicate compares it against the PR's
         # changed_files count and fails closed on truncation (codex r2, P2).
+        # Paths are base64-encoded per entry (#52 verify round, P1): git
+        # permits newlines in filenames, and raw lines would let one
+        # hostile filename split into several exempt-looking paths or
+        # inject tag/count lines into this line-oriented hand-off.
         run: |
           set -euo pipefail
           gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
-            --paginate --jq '.[] | "F\t" + .filename, (if .previous_filename then "P\t" + .previous_filename else empty end)' \
+            --paginate --jq '.[] | "F " + (.filename | @base64), (if .previous_filename then "P " + (.previous_filename | @base64) else empty end)' \
             > /tmp/changed-raw.txt
-          cut -f2- /tmp/changed-raw.txt > /tmp/changed-files.txt
-          listed=$(grep -c '^F' /tmp/changed-raw.txt || true)
+          cut -d' ' -f2 /tmp/changed-raw.txt > /tmp/changed-files.txt
+          listed=$(grep -c '^F ' /tmp/changed-raw.txt || true)
           echo "PR_LISTED_FILES=$listed" >> "$GITHUB_ENV"
           echo "$listed entry(ies) listed; $(wc -l < /tmp/changed-files.txt) path(s) fed (renames counted on both sides)."
 
@@ -82,4 +86,5 @@ jobs:
           # Env var, never shell interpolation: the body is untrusted input.
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          PR_PATHS_BASE64: "1"
         run: /tmp/check-ai-review.sh < /tmp/changed-files.txt

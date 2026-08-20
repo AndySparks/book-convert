@@ -169,4 +169,52 @@ echo "ok 13 - lenient formatting still passes"
 printf '' | PR_BODY='' "$GUARD" >/dev/null || fail "empty diff refused"
 echo "ok 14 - empty diff passes"
 
+# 15. RED: newline-in-filename (#52 verify round, P1) — in base64 mode ONE
+#     entry stays ONE path; a filename containing \n that covers a
+#     mandatory path is classified intact, never split into exempt lines.
+enc=$(printf 'scripts/evil.py\nREADME.md' | base64 | tr -d '\n')
+set +e
+printf '%s\n' "$enc" \
+  | PR_BODY='No review.' PR_PATHS_BASE64=1 "$GUARD" >/dev/null 2>&1 \
+  && fail "newline-bearing mandatory filename passed"
+set -e
+# GREEN counterpart: base64 mode still exempts a plain docs path.
+enc=$(printf 'docs/notes.md' | base64 | tr -d '\n')
+printf '%s\n' "$enc" \
+  | PR_BODY='No review.' PR_PATHS_BASE64=1 "$GUARD" >/dev/null \
+  || fail "base64 docs path lost the exemption"
+echo "ok 15 - base64 mode: newline-bearing mandatory filename fails; docs path stays exempt"
+
+# 16. RED: labels inside larger words supply nothing (#52 verify, P2)
+set +e
+printf 'convert.py\n' | PR_BODY='## AI review
+backgrounds: 2, notengine: codex, nonverdict: pass' \
+  "$GUARD" >/dev/null 2>&1 && fail "embedded labels (backgrounds/notengine/nonverdict) passed"
+set -e
+echo "ok 16 - backgrounds:/notengine:/nonverdict: are not rounds/engine/verdict"
+
+# 17. RED: heading boundaries (#52 verify, P2) — '## AI reviewer notes'
+#     must NOT open the section; a tab-headed '##<TAB>Notes' MUST close it.
+set +e
+printf 'convert.py\n' \
+  | PR_BODY='## AI reviewer notes — rounds: 2, engine: codex, verdict: pass' \
+    "$GUARD" >/dev/null 2>&1 && fail "'## AI reviewer notes' opened the section"
+set -e
+set +e
+printf 'convert.py\n' | PR_BODY="$(printf '## AI review — rounds: 2\n##\tNotes\nengine: codex, verdict: pass')" \
+  "$GUARD" >/dev/null 2>&1 && fail "tab-headed heading failed to close the section"
+set -e
+echo "ok 17 - suffixed heading does not open; tab-headed heading closes"
+
+# 18. GREEN: oversized body (#52 verify, P2) — the check must not be
+#     killable by its own plumbing (no early-exiting pipeline / SIGPIPE).
+#     10k lines (~350 KB) is far past the 64 KB pipe buffer that made an
+#     early-exiting awk SIGPIPE its feeder — and >5x GitHub's own 64 KB
+#     PR-body cap, so this over-covers anything the workflow can see.
+big_tail=$( { yes 'filler line for the oversized-body case'; } | head -n 10000 || true)
+printf 'convert.py\n' \
+  | PR_BODY="$(printf '## AI review — rounds: 2, engine: codex, verdict: pass\nround detail\n## Tail\n%s' "$big_tail")" \
+    "$GUARD" >/dev/null || fail "oversized body refused (plumbing killed the check?)"
+echo "ok 18 - oversized body (10k-line tail after the section) passes"
+
 echo "PASS check-ai-review"

@@ -12,7 +12,11 @@
 # Input:  changed file paths on stdin, one per line — for renames the
 #         workflow feeds BOTH sides (filename + previous_filename), so a
 #         code file renamed into docs/ still reads as code; the PR body
-#         in $PR_BODY. Optionally $PR_CHANGED_FILES (the PR API's
+#         in $PR_BODY. With $PR_PATHS_BASE64=1 each stdin line is a
+#         base64-encoded path, decoded here — git permits newlines in
+#         filenames, and raw lines would let one hostile filename
+#         masquerade as several (or inject count/tag lines), so the
+#         workflow always uses this mode. Optionally $PR_CHANGED_FILES (the PR API's
 #         changed_files count) and $PR_LISTED_FILES (how many entries the
 #         file listing actually returned): the pulls/files endpoint caps
 #         at 3,000 entries, so listed < changed means the listing is
@@ -48,7 +52,12 @@ exempt() {  # $1 = path; docs-shaped?
 
 files=()
 while IFS= read -r line; do
-  [ -n "$line" ] && files+=("$line")
+  [ -n "$line" ] || continue
+  if [ "${PR_PATHS_BASE64-}" = "1" ]; then
+    line=$(base64 -d <<<"$line")
+    [ -n "$line" ] || continue
+  fi
+  files+=("$line")
 done
 
 if [ "${#files[@]}" -eq 0 ]; then
@@ -88,8 +97,15 @@ body="${PR_BODY-}"
 # slice, so stale template text elsewhere in the body supplies nothing —
 # and <!-- --> comment content (same-line spans AND multi-line blocks) is
 # stripped first, so a commented-out template supplies nothing either.
-section=$(printf '%s\n' "$body" | awk '
+# The opening heading is end-bounded ("## AI reviewer notes" must not open
+# it); the closing check accepts any whitespace after ## (tabs too). The
+# awk never calls exit — an early exit would SIGPIPE its feeder under
+# pipefail on a large body (shell-cosmetic-measurement class), so it flags
+# `closed` and drains the rest of the input instead; here-strings replace
+# pipelines throughout for the same reason.
+section=$(awk '
   {
+    if (closed) next
     # Close a comment block opened on an earlier line.
     if (incomment) {
       e = index($0, "-->")
@@ -105,22 +121,24 @@ section=$(printf '%s\n' "$body" | awk '
       if (e == 0) { $0 = substr($0, 1, s - 1); incomment = 1; break }
       $0 = substr($0, 1, s - 1) substr(rest, e + 3)
     }
-    if (insec && $0 ~ /^[[:space:]]*## /) exit
+    if (insec && $0 ~ /^[[:space:]]*##[[:space:]]/) { closed = 1; next }
     if (insec) { print; next }
-    if (tolower($0) ~ /^[[:space:]]*##[[:space:]]*ai review/) { insec = 1; print }
+    if (tolower($0) ~ /^[[:space:]]*##[[:space:]]+ai review([^[:alnum:]]|$)/) { insec = 1; print }
   }
-')
+' <<<"$body")
 
 # Field values are bounded at commas/semicolons/whitespace BEFORE requiring
 # an alphanumeric, so an empty field cannot consume the next label
 # ("engine:,verdict:pass" is an empty engine, not engine=",verdict:pass").
-# rounds accepts a sentence-final "2." only at a real token boundary
-# (whitespace or end of line) — "2.5" and "2.foo" both fail.
+# Each label requires a non-word character (or line start) before it, so
+# "backgrounds:" / "notengine:" / "nonverdict:" supply nothing. rounds
+# accepts a sentence-final "2." only at a real token boundary (whitespace
+# or end of line) — "2.5" and "2.foo" both fail.
 ok=true
 [ -n "$section" ] || ok=false
-printf '%s' "$section" | grep -Eiq 'rounds:[[:space:]]*2([[:space:],;)]|\.([[:space:]]|$)|$)'   || ok=false
-printf '%s' "$section" | grep -Eiq 'engine[:[:space:]][[:space:]]*[^,;[:space:]]*[[:alnum:]]'  || ok=false
-printf '%s' "$section" | grep -Eiq 'verdict[:[:space:]][[:space:]]*[^,;[:space:]]*[[:alnum:]]' || ok=false
+grep -Eiq '(^|[^[:alnum:]_])rounds:[[:space:]]*2([[:space:],;)]|\.([[:space:]]|$)|$)'   <<<"$section" || ok=false
+grep -Eiq '(^|[^[:alnum:]_])engine[:[:space:]][[:space:]]*[^,;[:space:]]*[[:alnum:]]'  <<<"$section" || ok=false
+grep -Eiq '(^|[^[:alnum:]_])verdict[:[:space:]][[:space:]]*[^,;[:space:]]*[[:alnum:]]' <<<"$section" || ok=false
 
 if [ "$ok" = true ]; then
   echo "AI-review section found (rounds: 2 + engine + verdict recorded)."

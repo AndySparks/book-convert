@@ -68,13 +68,14 @@ for bad in \
   '## AI review — rounds: 1, engine: codex, verdict: pass' \
   '## AI review — rounds: 12, engine: codex, verdict: pass' \
   '## AI review — rounds: 2+, engine: codex, verdict: pass' \
-  '## AI review — rounds: 2.5, engine: codex, verdict: pass'; do
+  '## AI review — rounds: 2.5, engine: codex, verdict: pass' \
+  '## AI review — rounds: 2.foo, engine: codex, verdict: pass'; do
   set +e
   printf 'convert.py\n' | PR_BODY="$bad" "$GUARD" >/dev/null 2>&1 \
     && fail "wrong round count passed: $bad"
   set -e
 done
-echo "ok 6 - rounds: 1 / 12 / 2+ / 2.5 all fail"
+echo "ok 6 - rounds: 1 / 12 / 2+ / 2.5 / 2.foo all fail"
 
 # 7. GREEN: sentence-final "rounds: 2." is exactly two (codex round 2, P2)
 printf 'convert.py\n' \
@@ -89,6 +90,7 @@ echo "ok 7 - sentence-final 'rounds: 2.' passes"
 for bad in \
   '## AI review — rounds: 2, engine: , verdict: pass' \
   '## AI review — rounds: 2, engine: -, verdict: pass' \
+  '## AI review — rounds: 2, engine:,verdict:pass' \
   '## AI review — rounds: 2, engine: codex, verdict:' \
   '## AI review — rounds: 2, verdict: pass' \
   '## AI review — rounds: 2, engine: codex'; do
@@ -97,7 +99,11 @@ for bad in \
     && fail "incomplete record passed: $bad"
   set -e
 done
-echo "ok 8 - empty/missing engine or verdict values fail"
+# GREEN counterpart: the compact no-space form with real values passes.
+printf 'convert.py\n' \
+  | PR_BODY='## AI review — rounds: 2, engine:codex,verdict:pass' \
+    "$GUARD" >/dev/null || fail "compact engine:codex,verdict:pass refused"
+echo "ok 8 - empty engine values (incl. engine:,verdict:pass) fail; compact real values pass"
 
 # 9. RED: fields OUTSIDE the one AI-review section supply nothing —
 #    split across two sections, or in commented template text
@@ -113,7 +119,14 @@ printf 'convert.py\n' | PR_BODY='<!-- template:
 ## AI review — rounds: 2, engine: codex, verdict: pass
 -->' "$GUARD" >/dev/null 2>&1 && fail "commented template passed"
 set -e
-echo "ok 9 - fields split across sections / commented template fail"
+# Same-line HTML comment INSIDE the section supplies nothing either
+# (#52 direct round, P2).
+set +e
+printf 'convert.py\n' | PR_BODY='## AI review
+<!-- rounds: 2, engine: codex, verdict: pass -->' \
+  "$GUARD" >/dev/null 2>&1 && fail "single-line commented template inside section passed"
+set -e
+echo "ok 9 - fields split across sections / commented templates (block + same-line) fail"
 
 # 10. RED: rename laundering — report.py renamed to docs/report.md; the
 #     workflow feeds BOTH sides, and the old side must revoke the exemption

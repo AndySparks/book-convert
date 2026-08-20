@@ -86,22 +86,41 @@ body="${PR_BODY-}"
 # Extract ONE section: the first `## AI review` heading through the line
 # before the next `## ` heading (or EOF). All field checks run inside this
 # slice, so stale template text elsewhere in the body supplies nothing —
-# and lines inside <!-- --> comment blocks are skipped, so a commented-out
-# template cannot open the section either.
+# and <!-- --> comment content (same-line spans AND multi-line blocks) is
+# stripped first, so a commented-out template supplies nothing either.
 section=$(printf '%s\n' "$body" | awk '
-  !incomment && /<!--/ && !/-->/ { incomment = 1; next }
-  incomment && /-->/             { incomment = 0; next }
-  incomment                      { next }
-  insec && $0 ~ /^[[:space:]]*## / { exit }
-  insec { print; next }
-  tolower($0) ~ /^[[:space:]]*##[[:space:]]*ai review/ { insec = 1; print }
+  {
+    # Close a comment block opened on an earlier line.
+    if (incomment) {
+      e = index($0, "-->")
+      if (e == 0) next
+      $0 = substr($0, e + 3)
+      incomment = 0
+    }
+    # Strip complete same-line <!-- ... --> spans; an unclosed opener
+    # drops the rest of the line and opens a block.
+    while ((s = index($0, "<!--")) > 0) {
+      rest = substr($0, s + 4)
+      e = index(rest, "-->")
+      if (e == 0) { $0 = substr($0, 1, s - 1); incomment = 1; break }
+      $0 = substr($0, 1, s - 1) substr(rest, e + 3)
+    }
+    if (insec && $0 ~ /^[[:space:]]*## /) exit
+    if (insec) { print; next }
+    if (tolower($0) ~ /^[[:space:]]*##[[:space:]]*ai review/) { insec = 1; print }
+  }
 ')
 
+# Field values are bounded at commas/semicolons/whitespace BEFORE requiring
+# an alphanumeric, so an empty field cannot consume the next label
+# ("engine:,verdict:pass" is an empty engine, not engine=",verdict:pass").
+# rounds accepts a sentence-final "2." only at a real token boundary
+# (whitespace or end of line) — "2.5" and "2.foo" both fail.
 ok=true
 [ -n "$section" ] || ok=false
-printf '%s' "$section" | grep -Eiq 'rounds:[[:space:]]*2([[:space:],;)]|\.([^0-9]|$)|$)'  || ok=false
-printf '%s' "$section" | grep -Eiq 'engine[:[:space:]][[:space:]]*[^[:space:]]*[[:alnum:]]'  || ok=false
-printf '%s' "$section" | grep -Eiq 'verdict[:[:space:]][[:space:]]*[^[:space:]]*[[:alnum:]]' || ok=false
+printf '%s' "$section" | grep -Eiq 'rounds:[[:space:]]*2([[:space:],;)]|\.([[:space:]]|$)|$)'   || ok=false
+printf '%s' "$section" | grep -Eiq 'engine[:[:space:]][[:space:]]*[^,;[:space:]]*[[:alnum:]]'  || ok=false
+printf '%s' "$section" | grep -Eiq 'verdict[:[:space:]][[:space:]]*[^,;[:space:]]*[[:alnum:]]' || ok=false
 
 if [ "$ok" = true ]; then
   echo "AI-review section found (rounds: 2 + engine + verdict recorded)."

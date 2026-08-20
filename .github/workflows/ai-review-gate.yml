@@ -1,0 +1,67 @@
+# Require the different-model review record on every non-docs PR.
+# wiki-reliability Phase 4.2, ruling § 9.2 (management-craft
+# docs/2B-PROJECTS/wiki-reliability/v1/RESEARCH.md; written rule at
+# ~/.claude/CLAUDE.md § "Different-model review gate"): PRs touching raw/,
+# tools/, scripts/, gates, or conversion code get a different-model review
+# (Claude-built -> Codex; Codex-built -> Claude), exactly two rounds,
+# recorded in the PR body as `## AI review — rounds: 2, engine, verdict`.
+# Pure-docs PRs (every changed file *.md or under docs/) are exempt.
+#
+# Deliberately cheap: NO repo checkout — the output corpus is heavy, and the
+# gate only needs (a) the changed-file listing and (b) the PR body, both from
+# the API. The one repo file it needs, the predicate script, is fetched via
+# the contents API from the BASE branch, so a PR cannot rewrite its own gate
+# (fallback to the PR head only when the base doesn't hold the script yet —
+# i.e. the bootstrap PR that introduces it).
+#
+# The predicate itself lives in scripts/ci/check-ai-review.sh — standalone on
+# purpose, because a workflow cannot be executed locally; it runs red and
+# green in scripts/ci/check-ai-review.test.sh.
+#
+# NOTE: a workflow alone only REPORTS. To make it BLOCK merges, the check
+# must be marked required in branch protection — see the PR that introduced
+# this file.
+name: AI review gate
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ai-review-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Fetch the gate predicate from the base branch
+        run: |
+          set -euo pipefail
+          fetch() {
+            gh api "repos/${{ github.repository }}/contents/scripts/ci/check-ai-review.sh?ref=$1" \
+              --jq .content | base64 -d > /tmp/check-ai-review.sh
+          }
+          if ! fetch "${{ github.event.pull_request.base.ref }}"; then
+            echo "Predicate not on base branch yet (bootstrap PR) — using the PR head copy."
+            fetch "${{ github.event.pull_request.head.sha }}"
+          fi
+          chmod +x /tmp/check-ai-review.sh
+
+      - name: List the PR's changed files
+        run: |
+          gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            --paginate --jq '.[].filename' > /tmp/changed-files.txt
+          echo "$(wc -l < /tmp/changed-files.txt) changed file(s)."
+
+      - name: Require the AI-review section
+        env:
+          # Env var, never shell interpolation: the body is untrusted input.
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: /tmp/check-ai-review.sh < /tmp/changed-files.txt

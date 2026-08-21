@@ -1,0 +1,90 @@
+# Require the different-model review record on every non-docs PR.
+# wiki-reliability Phase 4.2, ruling § 9.2 (management-craft
+# docs/2B-PROJECTS/wiki-reliability/v1/RESEARCH.md; written rule at
+# ~/.claude/CLAUDE.md § "Different-model review gate"): PRs touching raw/,
+# tools/, scripts/, gates, or conversion code get a different-model review
+# (Claude-built -> Codex; Codex-built -> Claude), exactly two rounds,
+# recorded in the PR body as `## AI review — rounds: 2, engine, verdict`.
+# Pure-docs PRs are exempt; the mandatory/exempt classification lives in
+# the predicate, scripts/ci/check-ai-review.sh.
+#
+# Trigger is pull_request_target ON PURPOSE (codex round 1, P1): with plain
+# pull_request a PR that edits THIS FILE runs its own edited definition, so
+# it can replace the job with unconditional success before the base-fetched
+# predicate ever runs. pull_request_target runs the BASE branch's workflow
+# definition, closing that hole. Consequence: the gate validates a change
+# to itself only AFTER that change merges (the bootstrap PR ran green under
+# the old trigger; see PR #52).
+#
+# pull_request_target SECURITY: this job must NEVER execute head content.
+# It has no checkout step at all; changed files and the PR body come from
+# the API (body only ever into an env var, never shell-interpolated); the
+# one script it runs is fetched via the contents API from the BASE branch.
+# Keep it that way — adding `actions/checkout` of the head ref here would
+# hand the PR author code execution with a base-context token.
+#
+# Deliberately cheap otherwise: the output corpus is heavy, and the gate
+# only needs the diff listing and the body. The predicate is standalone
+# (a workflow cannot be executed locally) and runs red and green in
+# scripts/ci/check-ai-review.test.sh.
+#
+# NOTE: a workflow alone only REPORTS. To make it BLOCK merges, the check
+# must be marked required in branch protection — see the PR that introduced
+# this file.
+name: AI review gate
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ai-review-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Fetch the gate predicate from the base branch
+        # Base branch only — no head fallback: under pull_request_target the
+        # workflow definition itself is already the base's, and fetching the
+        # predicate from the head would let a PR rewrite its own gate.
+        run: |
+          set -euo pipefail
+          gh api "repos/${{ github.repository }}/contents/scripts/ci/check-ai-review.sh?ref=${{ github.event.pull_request.base.ref }}" \
+            --jq .content | base64 -d > /tmp/check-ai-review.sh
+          chmod +x /tmp/check-ai-review.sh
+
+      - name: List the PR's changed files
+        # Renames contribute BOTH sides: previous_filename too, so a code
+        # file renamed into docs/ cannot read as docs-only (codex r1, P2).
+        # PR_LISTED_FILES counts the entries the endpoint actually returned
+        # (it caps at 3,000): the predicate compares it against the PR's
+        # changed_files count and fails closed on truncation (codex r2, P2).
+        # Paths are base64-encoded per entry (#52 verify round, P1): git
+        # permits newlines in filenames, and raw lines would let one
+        # hostile filename split into several exempt-looking paths or
+        # inject tag/count lines into this line-oriented hand-off.
+        run: |
+          set -euo pipefail
+          gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            --paginate --jq '.[] | "F " + (.filename | @base64), (if .previous_filename then "P " + (.previous_filename | @base64) else empty end)' \
+            > /tmp/changed-raw.txt
+          cut -d' ' -f2 /tmp/changed-raw.txt > /tmp/changed-files.txt
+          listed=$(grep -c '^F ' /tmp/changed-raw.txt || true)
+          echo "PR_LISTED_FILES=$listed" >> "$GITHUB_ENV"
+          echo "$listed entry(ies) listed; $(wc -l < /tmp/changed-files.txt) path(s) fed (renames counted on both sides)."
+
+      - name: Require the AI-review section
+        env:
+          # Env var, never shell interpolation: the body is untrusted input.
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          PR_PATHS_BASE64: "1"
+        run: /tmp/check-ai-review.sh < /tmp/changed-files.txt

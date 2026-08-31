@@ -141,24 +141,125 @@ CAPTION_SEARCH_DISTANCE = 40
 # DPI for rendered assets.
 ASSET_DPI = 220
 
+# --- page scans are not figures --------------------------------------------
+#
+# A home-scanned or archive.org book is one full-page bitmap per page with an
+# OCR text layer sitting on top of it. `find_raster_regions` sees that bitmap
+# as a figure region spanning the entire page, and the region splicer in
+# convert.py emits region markdown IN PLACE OF the text underneath it -- so a
+# full-page region consumes every character on the page.
+#
+# On William James's *Principles of Psychology* Vol 1 (704 pages) that turned
+# the whole book into 704 `![Figure on page N]` lines and 9,350 words, about
+# 1% of the text. Nothing caught it: quality_score read 1.0, the
+# degenerate-text gate was clean, and the locator gate was clean.
+#
+# THE DECISION IS PER DOCUMENT, NOT PER PAGE, and that is the whole subtlety.
+#
+# Per page you cannot tell these two apart without guessing:
+#
+#   - a scanned book's chapter-opener, which carries a full-page bitmap and
+#     only three lines of text; and
+#   - a prose book's full-page plate, which carries a full-page image and only
+#     its caption.
+#
+# Guessing by "how much text is on this page" gets one of them wrong every
+# time, and the first draft of this fix did: it used a 200-character floor,
+# which would have silently eaten the text of every sparse page in a scanned
+# book -- a smaller version of the very bug it was written for.
+#
+# A book, though, is scanned throughout or it is not. So we ask the DOCUMENT:
+# do most of its pages carry a full-page bitmap with text on top? If yes, every
+# full-page bitmap in it is a page scan and none of them is a figure. If no, a
+# full-page image is a plate and is kept.
+#
+# The text condition in the detector is what protects an un-OCR'd scan: a book
+# of page images with NO text layer is never classified as a page-scan
+# document, so its images -- the only content it has -- are still emitted.
+PAGE_SCAN_AREA_RATIO = 0.9
+# A page needs this much text before it counts as EVIDENCE of a text layer in
+# the detector. It is deliberately not used as a per-page gate; see above.
+PAGE_SCAN_MIN_TEXT_CHARS = 200
+# Fraction of sampled pages that must look like a scanned page before the
+# whole document is treated as a scan.
+PAGE_SCAN_DOC_FRACTION = 0.5
+# Sampling bound -- 704-page books should not pay a full extra pass.
+PAGE_SCAN_SAMPLE_PAGES = 40
+
+
+def _page_text_length(page: fitz.Page) -> int:
+    try:
+        return len(page.get_text().strip())
+    except Exception:
+        return 0
+
+
+def _covers_page(rect: fitz.Rect, page: fitz.Page) -> bool:
+    """True if `rect` covers essentially the whole page."""
+    page_rect = page.rect
+    page_area = page_rect.width * page_rect.height
+    if page_area <= 0:
+        return False
+    return (rect.width * rect.height) / page_area >= PAGE_SCAN_AREA_RATIO
+
+
+def detect_page_scan_document(doc) -> bool:
+    """True if `doc` is a scanned book: page bitmaps with a text layer on top.
+
+    Samples evenly across the document rather than reading every page, so a
+    700-page book does not pay a second full pass.
+    """
+    try:
+        total = doc.page_count
+    except Exception:
+        return False
+    if total <= 0:
+        return False
+
+    step = max(1, total // PAGE_SCAN_SAMPLE_PAGES)
+    indices = list(range(0, total, step))[:PAGE_SCAN_SAMPLE_PAGES]
+    if not indices:
+        return False
+
+    scanned = 0
+    for i in indices:
+        try:
+            page = doc[i]
+        except Exception:
+            continue
+        if _page_text_length(page) < PAGE_SCAN_MIN_TEXT_CHARS:
+            continue
+        if any(_covers_page(r, page) for r in find_raster_regions(page)):
+            scanned += 1
+    return (scanned / len(indices)) >= PAGE_SCAN_DOC_FRACTION
+
 
 def extract_page_assets(
     page: fitz.Page,
     stem: str,
     asset_dir: Path,
     page_num: int,
+    page_scan_document: bool = False,
 ) -> List[Tuple[fitz.Rect, str]]:
     """Render all figure regions on a page and return (rect, markdown) pairs.
 
     `stem` is the markdown output filename without extension — used to
     build an asset subdirectory name. `page_num` is the 1-indexed page
     number used in the asset filename.
+
+    `page_scan_document` comes from `detect_page_scan_document` and says the
+    book is a scan; when it is set, a region covering the whole page is the
+    page's own bitmap and is dropped so the text layer survives. See
+    "page scans are not figures" above.
     """
     raster = find_raster_regions(page)
     vector = find_vector_regions(page)
 
     # Combine and merge overlapping regions.
     combined = _merge_rects(raster + vector, gap=REGION_PADDING)
+    if page_scan_document:
+        # Drop the page's own scan bitmap (see "page scans are not figures").
+        combined = [r for r in combined if not _covers_page(r, page)]
     if not combined:
         return []
 

@@ -176,13 +176,22 @@ ASSET_DPI = 220
 # The text condition in the detector is what protects an un-OCR'd scan: a book
 # of page images with NO text layer is never classified as a page-scan
 # document, so its images -- the only content it has -- are still emitted.
-PAGE_SCAN_AREA_RATIO = 0.9
-# A page needs this much text before it counts as EVIDENCE of a text layer in
-# the detector. It is deliberately not used as a per-page gate; see above.
+# A region must cover this fraction of the page in BOTH dimensions. Comparing
+# areas alone is not enough: a banner twice the page width and 45% of its
+# height has the area of 90% of the page without covering it, and an image
+# hanging off the crop box is bigger than the page it sits on. Both dimensions
+# plus the intersection with the page rect is what "covers the page" means.
+PAGE_SCAN_COVER_RATIO = 0.9
+# A page needs this much text to count as carrying a text layer.
 PAGE_SCAN_MIN_TEXT_CHARS = 200
-# Fraction of sampled pages that must look like a scanned page before the
-# whole document is treated as a scan.
-PAGE_SCAN_DOC_FRACTION = 0.5
+# Of the sampled pages THAT CARRY TEXT, this fraction must be full-page
+# bitmaps before the document is treated as a scan. The denominator is
+# text-bearing pages, not all sampled pages, because a scanned book's blank
+# versos, plate pages and sparse chapter-openers are not evidence either way
+# and must not drag a real scan below the bar -- that was the defect in the
+# first draft, which classified a 3-page scan with one text-heavy page as
+# not-a-scan and ate all three text layers.
+PAGE_SCAN_DOC_FRACTION = 0.6
 # Sampling bound -- 704-page books should not pay a full extra pass.
 PAGE_SCAN_SAMPLE_PAGES = 40
 
@@ -195,12 +204,32 @@ def _page_text_length(page: fitz.Page) -> int:
 
 
 def _covers_page(rect: fitz.Rect, page: fitz.Page) -> bool:
-    """True if `rect` covers essentially the whole page."""
+    """True if `rect` covers essentially the whole page in both dimensions."""
     page_rect = page.rect
-    page_area = page_rect.width * page_rect.height
-    if page_area <= 0:
+    if page_rect.width <= 0 or page_rect.height <= 0:
         return False
-    return (rect.width * rect.height) / page_area >= PAGE_SCAN_AREA_RATIO
+    # Only the part of the region actually on the page counts.
+    visible = fitz.Rect(rect) & page_rect
+    if visible.is_empty:
+        return False
+    return (
+        visible.width / page_rect.width >= PAGE_SCAN_COVER_RATIO
+        and visible.height / page_rect.height >= PAGE_SCAN_COVER_RATIO
+    )
+
+
+def _sample_indices(total: int, want: int):
+    """Up to `want` indices spread evenly across [0, total).
+
+    `range(0, total, total // want)` truncated to `want` entries samples only
+    the FRONT of the document whenever the step rounds down to 1 -- a 79-page
+    book was sampled over pages 0-39 and its whole second half went unseen.
+    """
+    if total <= 0 or want <= 0:
+        return []
+    if total <= want:
+        return list(range(total))
+    return sorted({round(i * (total - 1) / (want - 1)) for i in range(want)})
 
 
 def detect_page_scan_document(doc) -> bool:
@@ -208,30 +237,39 @@ def detect_page_scan_document(doc) -> bool:
 
     Samples evenly across the document rather than reading every page, so a
     700-page book does not pay a second full pass.
+
+    The ratio is taken over pages that CARRY TEXT. A document with no
+    text-bearing pages at all -- an un-OCR'd scan, a book of plates -- is
+    never a page-scan document, so its images survive: they are the only
+    content it has.
     """
     try:
         total = doc.page_count
     except Exception:
         return False
-    if total <= 0:
-        return False
 
-    step = max(1, total // PAGE_SCAN_SAMPLE_PAGES)
-    indices = list(range(0, total, step))[:PAGE_SCAN_SAMPLE_PAGES]
+    indices = _sample_indices(total, PAGE_SCAN_SAMPLE_PAGES)
     if not indices:
         return False
 
+    text_pages = 0
     scanned = 0
     for i in indices:
         try:
             page = doc[i]
+            if _page_text_length(page) < PAGE_SCAN_MIN_TEXT_CHARS:
+                continue
+            text_pages += 1
+            if any(_covers_page(r, page) for r in find_raster_regions(page)):
+                scanned += 1
         except Exception:
+            # A page that cannot be read is not evidence either way, and must
+            # not sit in the denominator biasing the answer toward "not a
+            # scan" -- the answer that loses text.
             continue
-        if _page_text_length(page) < PAGE_SCAN_MIN_TEXT_CHARS:
-            continue
-        if any(_covers_page(r, page) for r in find_raster_regions(page)):
-            scanned += 1
-    return (scanned / len(indices)) >= PAGE_SCAN_DOC_FRACTION
+    if text_pages == 0:
+        return False
+    return (scanned / text_pages) >= PAGE_SCAN_DOC_FRACTION
 
 
 def extract_page_assets(

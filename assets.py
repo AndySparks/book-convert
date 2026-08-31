@@ -46,18 +46,31 @@ CAPTION_RE = re.compile(
 MIN_IMAGE_AREA = 2000  # ~45x45 px at PDF native resolution
 
 
+class RasterProbeFailed(Exception):
+    """`get_image_info` could not be read for a page.
+
+    Distinct from "this page has no images". The detector must not count a
+    page it could not inspect as evidence that a book is not a scan -- that
+    is the direction that loses text.
+    """
+
+
 def find_raster_regions(page: fitz.Page) -> List[fitz.Rect]:
     """Return bounding boxes for embedded raster images on this page.
 
     Filters out tiny images (below MIN_IMAGE_AREA) that are almost always
     decorative: bullet glyphs, page decorations, imprint logos.
+
+    Raises RasterProbeFailed if the page's image table cannot be read at all.
+    Callers that only want figures treat that as "no images"; the page-scan
+    detector treats it as "no evidence" instead.
     """
     regions: List[fitz.Rect] = []
     try:
         # get_image_info returns dicts with 'bbox' key in PDF points.
         info = page.get_image_info(xrefs=True)
-    except Exception:
-        return []
+    except Exception as exc:
+        raise RasterProbeFailed(str(exc)) from exc
     for item in info:
         bbox = item.get("bbox")
         if not bbox or len(bbox) != 4:
@@ -242,6 +255,15 @@ def detect_page_scan_document(doc) -> bool:
     text-bearing pages at all -- an un-OCR'd scan, a book of plates -- is
     never a page-scan document, so its images survive: they are the only
     content it has.
+
+    KNOWN, DELIBERATE ASYMMETRY on very short documents. A two-page PDF whose
+    single text-bearing page is dominated by a legitimate full-page infographic
+    scores 1/1 and is called a scan, and that infographic is dropped. There is
+    no minimum-evidence floor to prevent it, because a floor would push short
+    genuine scans the other way -- and the two errors are not equal. Dropping
+    an image loses an image. Failing to detect a scan loses the TEXT of every
+    page, silently, with every downstream gate green. In a corpus whose product
+    is quotable text, the error that keeps the text is the one to prefer.
     """
     try:
         total = doc.page_count
@@ -259,8 +281,9 @@ def detect_page_scan_document(doc) -> bool:
             page = doc[i]
             if _page_text_length(page) < PAGE_SCAN_MIN_TEXT_CHARS:
                 continue
+            rasters = find_raster_regions(page)
             text_pages += 1
-            if any(_covers_page(r, page) for r in find_raster_regions(page)):
+            if any(_covers_page(r, page) for r in rasters):
                 scanned += 1
         except Exception:
             # A page that cannot be read is not evidence either way, and must
@@ -290,7 +313,11 @@ def extract_page_assets(
     page's own bitmap and is dropped so the text layer survives. See
     "page scans are not figures" above.
     """
-    raster = find_raster_regions(page)
+    try:
+        raster = find_raster_regions(page)
+    except RasterProbeFailed:
+        # For figure extraction, an unreadable image table means no figures.
+        raster = []
     vector = find_vector_regions(page)
 
     # Combine and merge overlapping regions.
@@ -579,6 +606,16 @@ def strip_dangling_refs(text: str, md_path: Path) -> Tuple[str, List[str]]:
     return IMAGE_REF_RE.sub(replace, text), stripped
 
 
+# KNOWN LIMITATION: this sweeps the asset directory as it stands, so it counts
+# files left behind by a PREVIOUS conversion into the same directory as assets
+# the current run wrote. It became easier to hit once the page-scan filter
+# started emitting no assets at all for a scanned book: reconverting such a
+# book after upgrading leaves the old per-page PNGs on disk and reports them as
+# current. No dangling markdown reference results -- the markdown simply does
+# not name them -- so the never-dangle invariant holds; what is wrong is the
+# asset COUNT in the report. Convert into a clean output directory after an
+# upgrade. (Raised by codex review, 2026-08-31; not fixed here because clearing
+# the directory is a destructive change that deserves its own change.)
 def build_asset_manifest(md_path: Path, asset_dir=None) -> List[dict]:
     """Describe every asset this conversion wrote, and what points at it.
 

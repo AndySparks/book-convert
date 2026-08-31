@@ -199,3 +199,48 @@ def test_image_only_page_still_emits_its_image(tmp_path):
         "an un-OCR'd full-page image is the page's only content and must "
         "still be emitted"
     )
+
+
+def test_an_unreadable_image_table_is_not_evidence_against_a_scan(tmp_path,
+                                                                  monkeypatch):
+    """A page we could not inspect must leave the denominator alone.
+
+    Counting it as "no full-page raster" biases the detector toward
+    not-a-scan, which is the answer that deletes the text.
+    """
+    pdf = build_scanned_ocr_pdf(tmp_path, pages=6, name="probe.pdf")
+    doc = fitz.open(str(pdf))
+    assert assets.detect_page_scan_document(doc), "control: this is a scan"
+
+    real = assets.find_raster_regions
+    calls = {"n": 0}
+
+    def flaky(page):
+        calls["n"] += 1
+        if calls["n"] % 2 == 0:
+            raise assets.RasterProbeFailed("simulated")
+        return real(page)
+
+    monkeypatch.setattr(assets, "find_raster_regions", flaky)
+    assert assets.detect_page_scan_document(doc), (
+        "pages whose image table could not be read must be skipped, not "
+        "counted as evidence that this is not a scan"
+    )
+    doc.close()
+
+
+def test_extract_page_assets_survives_an_unreadable_image_table(tmp_path,
+                                                                monkeypatch):
+    """Figure extraction keeps its old tolerant behaviour."""
+    pdf = build_figure_pdf(tmp_path)
+    doc = fitz.open(str(pdf))
+
+    def boom(page):
+        raise assets.RasterProbeFailed("simulated")
+
+    monkeypatch.setattr(assets, "find_raster_regions", boom)
+    # The vector figure is still found; the unreadable raster table is not
+    # allowed to take the whole page down.
+    extracted = assets.extract_page_assets(doc[0], "fig", tmp_path / "e", 1)
+    doc.close()
+    assert len(extracted) == 1

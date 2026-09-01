@@ -1167,6 +1167,104 @@ BACKEND_PAGE_NUMBERING = {
 }
 
 
+# How much support the best offset needs before a book that FAILED the
+# consistency check may still be called page-citable.
+#
+# Chosen from the corpus, not tuned. Of the 22 conversions whose sidecars said
+# `page_numbering: printed` with `offset_consistent: false` on 2026-09-01, the
+# support for the dominant offset was: 3%, then 54, 57, 67, 75, 77, 79, 84,
+# 84%, and the rest refused for adjacent dissent having already cleared the 85%
+# bar. There is a 51-point gap between the first and the second. 0.5 sits in
+# it, and the rule it expresses is "the captured folios do not cohere AT ALL",
+# not "this book renumbers somewhere".
+_PAGE_NUMBERING_MIN_OFFSET_SUPPORT = 0.5
+
+
+def _page_offset_support(page_printed_by_pdf_index):
+    """Fraction of captured arabic folios carrying the best-supported offset.
+
+    Returns None when there are too few samples to speak of support at all.
+    `_dominant_page_offset` computes this number to decide consensus and then
+    discards it; the verdict needs it, so it is computed here rather than
+    parsed back out of the warning prose.
+    """
+    by_index = _page_offset_samples(page_printed_by_pdf_index)
+    if len(by_index) < _OFFSET_MIN_SAMPLES:
+        return None
+    counts = collections.Counter(by_index.values())
+    _, agreeing = counts.most_common(1)[0]
+    return agreeing / len(by_index)
+
+
+def _decide_page_numbering(captured, offset_consistent, offset_support=None):
+    """What kind of page address can this conversion honestly produce?
+
+    "printed" is a LICENCE: mc-wiki's `tools/cite.py` refuses to cite a source
+    by page unless this reads "printed", so the value decides whether page
+    numbers out of this book can reach a citation.
+
+    It used to be granted on `captured > 0` alone -- any folio anywhere earned
+    it, however incoherent the pagination. Found 2026-09-01 by the annotated
+    edition of *The Human Side of Enterprise*: 30 folios across 480 sheets
+    (coverage 0.062), the dominant offset carried by 1 of 30 (3%), and the
+    captured values reading sheet 56 -> "1", 72 -> "2", 85 -> "4", 99 -> "3".
+    Those are the annotated edition's MARGINAL ANNOTATION NUMBERS being read as
+    folios. Filing on that verdict would have manufactured the same
+    fabricated-page-number hazard that `thiel-zero-to-one` was stamped to
+    correct the same night, where a chapter cited at p. 154 begins at p. 118.
+
+    THE FIX IS DELIBERATELY NARROW, and the first draft of it was not. Refusing
+    every `offset_consistent: false` book would have demoted 22 sources,
+    including *The Achievement Motive* (340 folios, 89.5% coverage) and
+    *Scaling People* (99.2%). Those are not incoherent -- they renumber
+    somewhere, or carry two sequences, which is ordinary and which
+    `page_correspondence_checked` already exists to adjudicate. Only a book
+    whose folios agree with each other almost nowhere loses the licence.
+
+    `page_printed_count` and `page_printed_coverage` are untouched, so
+    "captured folios that do not cohere" stays readable as count > 0 with
+    numbering == "pdf_only".
+
+    THREE BOUNDARIES THIS DELIBERATELY DOES NOT CROSS. All three were raised in
+    review; each is recorded here rather than silently left, because the next
+    person to read this will have the same three questions.
+
+    1. Fewer than three captured folios keeps the old verdict (support is
+       None). With no derived offset nothing is interpolated -- the few
+       markers present are CAPTURED values, not manufactured ones -- so a
+       book with one real folio genuinely does carry one real page number.
+       Demoting on sparseness is a different judgement about a different
+       defect, and it would move four more corpus sources on a question this
+       change did not investigate.
+
+    2. Support is measured over the captured-folio population, which is not
+       identical to `page_printed_count` (that counts EMITTED locators, after
+       blank and broken-TOC pages are dropped). That is deliberate: support
+       exists to describe the same evidence `_derive_page_offset` judged, and
+       judging it against a different population would make the number
+       disagree with the decision it explains.
+
+    3. A global modal share is a blunt coherence test. A volume with three
+       equally-sized numbering sequences scores ~0.33 and is demoted. That is
+       the intended reading rather than a false positive: in such a volume
+       "p. 50" does not identify a page without naming the sequence, so it is
+       not citable by page number alone. `page_correspondence_checked` is the
+       human override for a book where that judgement is wrong.
+    """
+    if not captured:
+        return "pdf_only"
+    if offset_consistent:
+        return "printed"
+    # Inconsistent, but with too few samples to judge support: leave the
+    # existing verdict alone rather than widen this change into sparse-capture
+    # territory, which is a different defect.
+    if offset_support is None:
+        return "printed"
+    if offset_support < _PAGE_NUMBERING_MIN_OFFSET_SUPPORT:
+        return "pdf_only"
+    return "printed"
+
+
 def _apply_backend_page_numbering(report):
     """Stamp a backend's fixed locator capability onto its report.
 
@@ -3012,6 +3110,12 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=True):
         for page_pdf, _, page_printed in cleaned_pages if page_printed
     }
     page_printed_offset, page_printed_offset_consistent = _derive_page_offset(page_printed_by_pdf_index)
+    # Support is measured HERE, on the same samples _derive_page_offset just
+    # judged -- not later. The outlier sweep below deletes every capture that
+    # contradicts an adopted offset, so a support figure taken after it reads
+    # ~1.0 for any book that got one, which is both useless and a false
+    # description of the field. (codex round 1, P2)
+    page_printed_offset_support = _page_offset_support(page_printed_by_pdf_index)
     # Captured-but-contradicting folios are misreads, exactly as on the
     # marker path. Drop them so interpolation supplies the right number
     # instead of publishing a corrupted one with full confidence, and so
@@ -3143,7 +3247,10 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=True):
         report.page_printed_count / report.page_locator_count
         if report.page_locator_count else 0.0
     )
-    report.page_numbering = "printed" if report.page_printed_count else "pdf_only"
+    report.page_printed_offset_support = page_printed_offset_support
+    report.page_numbering = _decide_page_numbering(
+        report.page_printed_count, page_printed_offset_consistent,
+        page_printed_offset_support)
     report.page_printed_offset = page_printed_offset
     report.page_printed_offset_consistent = page_printed_offset_consistent
 
@@ -3234,6 +3341,10 @@ def _rewrite_marker_page_locators(target, report):
         return
 
     offset, offset_consistent = _derive_page_offset(page_printed_by_index)
+    # Same reason as the pymupdf path: measure support on the samples the
+    # offset decision just judged, before the outlier sweep below removes the
+    # dissenters and makes every surviving book look unanimous.
+    offset_support_at_derivation = _page_offset_support(page_printed_by_index)
     # Captured-but-contradicting folios are OCR misreads. Drop them so
     # interpolation can supply the right number, and so the span below is
     # not stretched by a corrupted sample.
@@ -3283,7 +3394,11 @@ def _rewrite_marker_page_locators(target, report):
     report.page_locator_count = emitted
     report.page_printed_count = captured
     report.page_printed_coverage = captured / emitted if emitted else 0.0
-    report.page_numbering = "printed" if captured else "pdf_only"
+    # Measured on the samples the offset decision used; see the pymupdf path.
+    offset_support = offset_support_at_derivation
+    report.page_printed_offset_support = offset_support
+    report.page_numbering = _decide_page_numbering(
+        captured, offset_consistent, offset_support)
     report.page_printed_offset = offset
     report.page_printed_offset_consistent = offset_consistent
     print(f"  page locators: {emitted} pages, {captured} printed numbers "

@@ -667,3 +667,53 @@ def build_figure_epub(tmp_path: Path, name: str = "figure.epub") -> Path:
         (1, "The Second Move", "ch2.xhtml"),
     ]
     return build_epub(tmp_path, docs, nav, "ncx", name=name)
+
+
+def build_scanned_ocr_pdf(
+    tmp_path: Path,
+    pages: int = 3,
+    body: str = "The real sound of the cannon is the sensation it makes.",
+    name: str = "scanned_ocr.pdf",
+) -> Path:
+    """Build a PDF shaped like a home-scanned book with an OCR text layer.
+
+    Every page is one full-page raster image (the scan) with a text layer
+    sitting on top of it -- exactly what a Brother ADS-4700W scan that has
+    been OCR'd elsewhere looks like, and what archive.org serves. The
+    distinguishing feature is that the image bbox covers the WHOLE page,
+    so a naive figure-region splicer replaces the page's text with an
+    image reference and silently drops the book.
+    """
+    out = tmp_path / name
+    doc = fitz.open()
+    # A small grey PNG, stretched to fill the page. Content does not matter;
+    # the bbox covering the full page is the whole point.
+    src = fitz.open()
+    tmp_page = src.new_page(width=100, height=160)
+    tmp_page.draw_rect(fitz.Rect(0, 0, 100, 160), color=(0.5, 0.5, 0.5),
+                       fill=(0.5, 0.5, 0.5))
+    png = tmp_page.get_pixmap(dpi=72).tobytes("png")
+    src.close()
+
+    for i in range(pages):
+        page = doc.new_page(width=334, height=559)
+        page.insert_image(fitz.Rect(0, 0, 334, 559), stream=png)
+        # The OCR text layer: a running folio and a page's worth of prose.
+        # The volume matters -- the detector asks whether a page carries a
+        # real text layer, and a caption-sized string is not one.
+        page.insert_text((20, 20), str(36 + i))
+        # Varied per page: an identical line on every page is a running
+        # header, and the converter is right to strip it.
+        page.insert_text((20, 60), f"{body} ({i})")
+        y = 90
+        for n in range(14):
+            page.insert_text(
+                (20, y),
+                f"line {n} of ordinary body prose running the measure of "
+                f"the page as scanned book text does",
+                fontsize=8,
+            )
+            y += 14
+    doc.save(str(out))
+    doc.close()
+    return out

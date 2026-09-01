@@ -46,18 +46,31 @@ CAPTION_RE = re.compile(
 MIN_IMAGE_AREA = 2000  # ~45x45 px at PDF native resolution
 
 
+class RasterProbeFailed(Exception):
+    """`get_image_info` could not be read for a page.
+
+    Distinct from "this page has no images". The detector must not count a
+    page it could not inspect as evidence that a book is not a scan -- that
+    is the direction that loses text.
+    """
+
+
 def find_raster_regions(page: fitz.Page) -> List[fitz.Rect]:
     """Return bounding boxes for embedded raster images on this page.
 
     Filters out tiny images (below MIN_IMAGE_AREA) that are almost always
     decorative: bullet glyphs, page decorations, imprint logos.
+
+    Raises RasterProbeFailed if the page's image table cannot be read at all.
+    Callers that only want figures treat that as "no images"; the page-scan
+    detector treats it as "no evidence" instead.
     """
     regions: List[fitz.Rect] = []
     try:
         # get_image_info returns dicts with 'bbox' key in PDF points.
         info = page.get_image_info(xrefs=True)
-    except Exception:
-        return []
+    except Exception as exc:
+        raise RasterProbeFailed(str(exc)) from exc
     for item in info:
         bbox = item.get("bbox")
         if not bbox or len(bbox) != 4:
@@ -141,24 +154,177 @@ CAPTION_SEARCH_DISTANCE = 40
 # DPI for rendered assets.
 ASSET_DPI = 220
 
+# --- page scans are not figures --------------------------------------------
+#
+# A home-scanned or archive.org book is one full-page bitmap per page with an
+# OCR text layer sitting on top of it. `find_raster_regions` sees that bitmap
+# as a figure region spanning the entire page, and the region splicer in
+# convert.py emits region markdown IN PLACE OF the text underneath it -- so a
+# full-page region consumes every character on the page.
+#
+# On William James's *Principles of Psychology* Vol 1 (704 pages) that turned
+# the whole book into 704 `![Figure on page N]` lines and 9,350 words, about
+# 1% of the text. Nothing caught it: quality_score read 1.0, the
+# degenerate-text gate was clean, and the locator gate was clean.
+#
+# THE DECISION IS PER DOCUMENT, NOT PER PAGE, and that is the whole subtlety.
+#
+# Per page you cannot tell these two apart without guessing:
+#
+#   - a scanned book's chapter-opener, which carries a full-page bitmap and
+#     only three lines of text; and
+#   - a prose book's full-page plate, which carries a full-page image and only
+#     its caption.
+#
+# Guessing by "how much text is on this page" gets one of them wrong every
+# time, and the first draft of this fix did: it used a 200-character floor,
+# which would have silently eaten the text of every sparse page in a scanned
+# book -- a smaller version of the very bug it was written for.
+#
+# A book, though, is scanned throughout or it is not. So we ask the DOCUMENT:
+# do most of its pages carry a full-page bitmap with text on top? If yes, every
+# full-page bitmap in it is a page scan and none of them is a figure. If no, a
+# full-page image is a plate and is kept.
+#
+# The text condition in the detector is what protects an un-OCR'd scan: a book
+# of page images with NO text layer is never classified as a page-scan
+# document, so its images -- the only content it has -- are still emitted.
+# A region must cover this fraction of the page in BOTH dimensions. Comparing
+# areas alone is not enough: a banner twice the page width and 45% of its
+# height has the area of 90% of the page without covering it, and an image
+# hanging off the crop box is bigger than the page it sits on. Both dimensions
+# plus the intersection with the page rect is what "covers the page" means.
+PAGE_SCAN_COVER_RATIO = 0.9
+# A page needs this much text to count as carrying a text layer.
+PAGE_SCAN_MIN_TEXT_CHARS = 200
+# Of the sampled pages THAT CARRY TEXT, this fraction must be full-page
+# bitmaps before the document is treated as a scan. The denominator is
+# text-bearing pages, not all sampled pages, because a scanned book's blank
+# versos, plate pages and sparse chapter-openers are not evidence either way
+# and must not drag a real scan below the bar -- that was the defect in the
+# first draft, which classified a 3-page scan with one text-heavy page as
+# not-a-scan and ate all three text layers.
+PAGE_SCAN_DOC_FRACTION = 0.6
+# Sampling bound -- 704-page books should not pay a full extra pass.
+PAGE_SCAN_SAMPLE_PAGES = 40
+
+
+def _page_text_length(page: fitz.Page) -> int:
+    try:
+        return len(page.get_text().strip())
+    except Exception:
+        return 0
+
+
+def _covers_page(rect: fitz.Rect, page: fitz.Page) -> bool:
+    """True if `rect` covers essentially the whole page in both dimensions."""
+    page_rect = page.rect
+    if page_rect.width <= 0 or page_rect.height <= 0:
+        return False
+    # Only the part of the region actually on the page counts.
+    visible = fitz.Rect(rect) & page_rect
+    if visible.is_empty:
+        return False
+    return (
+        visible.width / page_rect.width >= PAGE_SCAN_COVER_RATIO
+        and visible.height / page_rect.height >= PAGE_SCAN_COVER_RATIO
+    )
+
+
+def _sample_indices(total: int, want: int):
+    """Up to `want` indices spread evenly across [0, total).
+
+    `range(0, total, total // want)` truncated to `want` entries samples only
+    the FRONT of the document whenever the step rounds down to 1 -- a 79-page
+    book was sampled over pages 0-39 and its whole second half went unseen.
+    """
+    if total <= 0 or want <= 0:
+        return []
+    if total <= want:
+        return list(range(total))
+    return sorted({round(i * (total - 1) / (want - 1)) for i in range(want)})
+
+
+def detect_page_scan_document(doc) -> bool:
+    """True if `doc` is a scanned book: page bitmaps with a text layer on top.
+
+    Samples evenly across the document rather than reading every page, so a
+    700-page book does not pay a second full pass.
+
+    The ratio is taken over pages that CARRY TEXT. A document with no
+    text-bearing pages at all -- an un-OCR'd scan, a book of plates -- is
+    never a page-scan document, so its images survive: they are the only
+    content it has.
+
+    KNOWN, DELIBERATE ASYMMETRY on very short documents. A two-page PDF whose
+    single text-bearing page is dominated by a legitimate full-page infographic
+    scores 1/1 and is called a scan, and that infographic is dropped. There is
+    no minimum-evidence floor to prevent it, because a floor would push short
+    genuine scans the other way -- and the two errors are not equal. Dropping
+    an image loses an image. Failing to detect a scan loses the TEXT of every
+    page, silently, with every downstream gate green. In a corpus whose product
+    is quotable text, the error that keeps the text is the one to prefer.
+    """
+    try:
+        total = doc.page_count
+    except Exception:
+        return False
+
+    indices = _sample_indices(total, PAGE_SCAN_SAMPLE_PAGES)
+    if not indices:
+        return False
+
+    text_pages = 0
+    scanned = 0
+    for i in indices:
+        try:
+            page = doc[i]
+            if _page_text_length(page) < PAGE_SCAN_MIN_TEXT_CHARS:
+                continue
+            rasters = find_raster_regions(page)
+            text_pages += 1
+            if any(_covers_page(r, page) for r in rasters):
+                scanned += 1
+        except Exception:
+            # A page that cannot be read is not evidence either way, and must
+            # not sit in the denominator biasing the answer toward "not a
+            # scan" -- the answer that loses text.
+            continue
+    if text_pages == 0:
+        return False
+    return (scanned / text_pages) >= PAGE_SCAN_DOC_FRACTION
+
 
 def extract_page_assets(
     page: fitz.Page,
     stem: str,
     asset_dir: Path,
     page_num: int,
+    page_scan_document: bool = False,
 ) -> List[Tuple[fitz.Rect, str]]:
     """Render all figure regions on a page and return (rect, markdown) pairs.
 
     `stem` is the markdown output filename without extension — used to
     build an asset subdirectory name. `page_num` is the 1-indexed page
     number used in the asset filename.
+
+    `page_scan_document` comes from `detect_page_scan_document` and says the
+    book is a scan; when it is set, a region covering the whole page is the
+    page's own bitmap and is dropped so the text layer survives. See
+    "page scans are not figures" above.
     """
-    raster = find_raster_regions(page)
+    try:
+        raster = find_raster_regions(page)
+    except RasterProbeFailed:
+        # For figure extraction, an unreadable image table means no figures.
+        raster = []
     vector = find_vector_regions(page)
 
     # Combine and merge overlapping regions.
     combined = _merge_rects(raster + vector, gap=REGION_PADDING)
+    if page_scan_document:
+        # Drop the page's own scan bitmap (see "page scans are not figures").
+        combined = [r for r in combined if not _covers_page(r, page)]
     if not combined:
         return []
 
@@ -440,6 +606,16 @@ def strip_dangling_refs(text: str, md_path: Path) -> Tuple[str, List[str]]:
     return IMAGE_REF_RE.sub(replace, text), stripped
 
 
+# KNOWN LIMITATION: this sweeps the asset directory as it stands, so it counts
+# files left behind by a PREVIOUS conversion into the same directory as assets
+# the current run wrote. It became easier to hit once the page-scan filter
+# started emitting no assets at all for a scanned book: reconverting such a
+# book after upgrading leaves the old per-page PNGs on disk and reports them as
+# current. No dangling markdown reference results -- the markdown simply does
+# not name them -- so the never-dangle invariant holds; what is wrong is the
+# asset COUNT in the report. Convert into a clean output directory after an
+# upgrade. (Raised by codex review, 2026-08-31; not fixed here because clearing
+# the directory is a destructive change that deserves its own change.)
 def build_asset_manifest(md_path: Path, asset_dir=None) -> List[dict]:
     """Describe every asset this conversion wrote, and what points at it.
 

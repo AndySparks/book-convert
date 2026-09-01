@@ -2940,6 +2940,13 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=True):
     print(f"  {total_pages} pages")
 
     title = clean_title(pdf_path.stem)
+    output_dir = Path(output_dir)
+    # Create the output directory here rather than relying on the asset writer
+    # to have made it as a side effect. A book with no extracted figures --
+    # which is exactly what a scanned book now is, see
+    # assets."page scans are not figures" -- otherwise fails at the final
+    # write with a FileNotFoundError after doing all of the work.
+    output_dir.mkdir(parents=True, exist_ok=True)
     output_file = output_dir / f"{pdf_path.stem}.md"
 
     report = ConversionReport(
@@ -2976,6 +2983,13 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=True):
     # prevents PyMuPDF from interleaving left/right columns mid-sentence
     # on journal-article pages.
     raw_pages = []
+    # A scanned book is one full-page bitmap per page with an OCR text layer on
+    # top. Decided once for the document, because per page a scanned book's
+    # sparse chapter-opener and a prose book's captioned plate are
+    # indistinguishable. See assets."page scans are not figures".
+    page_scan_document = assets.detect_page_scan_document(doc)
+    if page_scan_document:
+        print("  scanned book detected: page bitmaps will not be emitted as figures")
     for i in range(total_pages):
         page = doc[i]
         # Track how many pages look two-column so we can hint the user
@@ -2985,7 +2999,8 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=True):
         page_asset_regions = []
         if extract_images:
             extracted = assets.extract_page_assets(
-                page, pdf_path.stem, asset_dir, i + 1
+                page, pdf_path.stem, asset_dir, i + 1,
+                page_scan_document=page_scan_document,
             )
             total_assets += len(extracted)
             # Convert to (start_y, end_y, markdown) tuples for the

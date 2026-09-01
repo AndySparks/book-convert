@@ -208,8 +208,8 @@ which you have:
 
 | `page_numbering` | Meaning | Backends |
 |---|---|---|
-| `printed` | Real page numbers were captured | `pymupdf` and `marker`, when printed page numbers were actually found |
-| `pdf_only` | PDF page index only | `pymupdf` / `marker` (no printed numbers found), `pymupdf4llm`, `ocr` |
+| `printed` | Real page numbers were captured **and they cohere** — a dominant page_pdf→page_printed offset carries at least half the captured folios | `pymupdf` and `marker`, when printed page numbers were found and agree with each other |
+| `pdf_only` | PDF page index only. Also the verdict when folios *were* captured but do not cohere at all (`page_printed_offset_support` below 0.5) — numbers that disagree with each other are not a pagination, and `page_printed_count` stays non-zero so that case is still visible | `pymupdf` / `marker` (no printed numbers found, or incoherent ones), `pymupdf4llm`, `ocr` |
 | `none` | No locators emitted at all | `pandoc` (EPUB — reflowable, no pages exist), `docling` |
 
 `pymupdf` and `marker` both decide between `printed` and `pdf_only` at runtime;

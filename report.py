@@ -65,6 +65,13 @@ class ConversionReport:
     page_printed_coverage: float = 0.0
     page_printed_offset: int | None = None
     page_printed_offset_consistent: bool = False
+    # Fraction of captured arabic folios carrying the best-supported offset.
+    # None when there were too few samples to speak of support. This number was
+    # always computed to decide consensus and then discarded, which left the
+    # only record of it inside warning prose -- so the difference between a
+    # book that renumbers once (84% support) and one whose folios are not page
+    # numbers at all (3%) was unreadable by anything but a human.
+    page_printed_offset_support: float | None = None
     # Heading signals. EPUB is reflowable, so `page_numbering` is always
     # "none" and headings are the *only* addressability an epub has — which
     # makes a structureless conversion otherwise indistinguishable from a

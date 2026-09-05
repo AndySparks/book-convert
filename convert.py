@@ -3244,6 +3244,8 @@ def convert_with_pymupdf(pdf_path, output_dir, extract_images=True):
                 # printed page 1.
                 if candidate >= 1:
                     effective_page_printed = str(candidate)
+            report.page_map.append({"page_pdf": page_num, "page_printed": effective_page_printed,
+                                    "method": "observed" if page_printed is not None else "inferred" if effective_page_printed is not None else "none"})
             f.write(f"<!-- page_pdf={page_num} page_printed={effective_page_printed or 'none'} -->\n\n")
             emitted_locator_pages += 1
             # `page_printed`, not `effective_page_printed`: page_printed_count
@@ -3396,6 +3398,8 @@ def _rewrite_marker_page_locators(target, report):
             candidate = index + offset
             if candidate >= 1:
                 effective = str(candidate)
+        report.page_map.append({"page_pdf": index, "page_printed": effective,
+                                "method": "observed" if printed is not None else "inferred" if effective is not None else "none"})
         out.append(f"<!-- page_pdf={index} page_printed={effective or 'none'} -->\n")
         emitted += 1
         if printed:

@@ -2,7 +2,7 @@
 type: roadmap
 scope: sourceconvert
 status: active
-last_updated: 2026-04-27
+last_updated: 2026-09-05
 ---
 
 # sourceconvert — Roadmap
@@ -10,13 +10,15 @@ last_updated: 2026-04-27
 > Rolling punch list (Now / Next / Blocked / Someday). Update as work moves; drop items the moment they're done.
 > Loaded into Claude sessions automatically via `CLAUDE.md`.
 >
-> Renamed from `docs/TASKS.md` on 2026-04-27 as part of the spine adoption (`8-DECISIONS/2026-04-27-spine-adoption.md`). Same role, spine-aligned filename and frontmatter.
+> Renamed from `docs/1-ROADMAP.md` on 2026-04-27 as part of the spine adoption (`8-DECISIONS/2026-04-27-spine-adoption.md`). Same role, spine-aligned filename and frontmatter.
 >
 > sourceconvert is a small tool and does not carry a `0-STRATEGY.md`. For strategic context on why it exists, see the Management Craft STRATEGY.md under the MC Research Loop Acquire step. Publicly trackable bugs and features live in GitHub Issues at https://github.com/AndySparks/sourceconvert/issues.
 
 ## Now
 
 _none currently_
+
+September 5: conversion reports now retain per-page observed/inferred locator provenance and source/output hashes. Verified with the paired mc-wiki ingestion changes (413 converter tests pass).
 
 ## Next
 
@@ -48,10 +50,10 @@ _none currently_
 - **Remove** items the moment they're done. No archive. Git log is the history.
 - **Move** items between buckets as priority shifts.
 - `/start` surfaces items from "Now" and "Blocked" when opening the repo.
-- `/wrap` prompts to update TASKS.md at session end.
+- `/wrap` prompts to update 1-ROADMAP.md at session end.
 
 ## What does NOT go here
 
 - **Publicly trackable bugs and features**: GitHub Issues, with a link here if blocking active work in this repo.
-- **MC-wide tasks that happen to touch sourceconvert**: Management Craft's `docs/TASKS.md`. sourceconvert is infrastructure for MC's Research Loop Acquire step; strategic questions about the corpus live upstream.
+- **MC-wide tasks that happen to touch sourceconvert**: Management Craft's `docs/1-ROADMAP.md`. sourceconvert is infrastructure for MC's Research Loop Acquire step; strategic questions about the corpus live upstream.
 - **Cross-project personal admin**: Notion Tasks DB.

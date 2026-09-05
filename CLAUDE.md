@@ -32,7 +32,7 @@ The marginal cost of completeness is near zero with AI. Do the whole thing. Do i
 - **Never tell a consumer to pattern-match an asset filename.** `_page_N_Figure_M.jpeg` is marker's private convention. Relocating assets is done from the sidecar's `assets` manifest — `path` plus `references[].target` — which is stable across backends and across marker versions
 - If OCR output needs cleanup, help the user clean up the markdown: fix obvious OCR errors, add proper headings, remove page artifacts
 - Keep the markdown header format: title, "Converted from PDF" note, source filename, then `---` separator
-- Use `<!-- Page N -->` comments to mark page boundaries
+- Use typed `<!-- page_pdf=N page_printed=X -->` markers; PDF indices start at zero. Legacy `<!-- Page N -->` is not a print folio.
 - The `clean_title()` function strips version markers (e.g., "V3") from filenames for cleaner titles
 - Inspect the `.report.json` sidecar to see what happened: `jq '.method,.extracted_assets,.quality_score' output/*.report.json`
 
@@ -44,7 +44,7 @@ marker 2 needs `llama-server` (`brew install llama.cpp`) for its CPU/MPS backend
 
 ## Verifying a scan's page numbers
 
-`convert.py` reads printed folios where it can and **interpolates** the rest from a consensus offset. That leaves the output part measured and part computed, and nothing downstream can tell which is which. The failure it cannot survive is a **pagination shift** — an unnumbered plate section or bound-in map — because one constant offset is then applied over the top and every folio past it is smoothly, self-consistently wrong.
+`convert.py` reads printed folios where it can and **interpolates** the rest from a consensus offset. The report now records `page_map` entries with `method: observed | inferred | none`, bound to original/output SHA-256. Downstream consumers can distinguish observed numbers from interpolation; older reports cannot. The failure it cannot survive is a **pagination shift** — an unnumbered plate section or bound-in map — because one constant offset is then applied over the top and every folio past it is smoothly, self-consistently wrong.
 
 `python verify_folios.py <pdf>` reads the folios back off the page images and reports it. Exit 0 no shift, 1 a shift (folios past it are suspect), **2 too few folios read to say anything — which is not a pass**. `--json` for a machine-readable verdict.
 

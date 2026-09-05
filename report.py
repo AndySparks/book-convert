@@ -9,6 +9,8 @@ and any warnings.
 from __future__ import annotations
 
 import json
+import hashlib
+from functools import lru_cache
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import List
@@ -21,6 +23,10 @@ class ConversionReport:
     source: str
     output: str
     method: str
+    source_sha256: str | None = None
+    output_sha256: str | None = None
+    # One entry per emitted PDF marker; method says read, interpolated or absent.
+    page_map: list = field(default_factory=list)
     total_pages: int = 0
     pages_with_text: int = 0
     ocr_pages: int = 0
@@ -91,9 +97,29 @@ class ConversionReport:
         return asdict(self)
 
 
+@lru_cache(maxsize=16)
+def _digest(path, signature):
+    h = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
 def write_report(path: Path, report: ConversionReport) -> None:
     """Write a ConversionReport to a JSON sidecar at `path`."""
     path = Path(path)
+    for field_name, file_name in (("source_sha256", report.source), ("output_sha256", report.output)):
+        original = Path(file_name) if file_name else None
+        if original is not None and original.is_file():
+            st = original.stat()
+            setattr(report, field_name, _digest(str(original.resolve()),
+                    (st.st_size, st.st_mtime_ns, st.st_ctime_ns)))
+        else:
+            setattr(report, field_name, None)
+            warning = f"{field_name} unavailable: file is missing"
+            if warning not in report.warnings:
+                report.warnings.append(warning)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(report.to_dict(), indent=2, ensure_ascii=False) + "\n",
